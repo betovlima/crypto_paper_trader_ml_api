@@ -1,0 +1,547 @@
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import Callable
+
+import numpy as np
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import average_precision_score, brier_score_loss, log_loss, precision_score
+from xgboost import XGBClassifier
+
+from . import __version__
+from .features import atr_column, build_features, create_labels, feature_names, signal_ema_columns
+from .mexc import MEXCHistoryClient, TIMEFRAME_SECONDS
+from .schemas import ResolvedMLBacktestCreate
+from .settings_service import RuntimeParameters
+
+
+@dataclass
+class ProbabilityCalibrator:
+    solver: str
+    model: LogisticRegression | None = None
+
+    def fit(self, raw_probabilities: np.ndarray, labels: np.ndarray) -> None:
+        if len(np.unique(labels)) < 2:
+            return
+        model = LogisticRegression(solver=self.solver)
+        model.fit(raw_probabilities.reshape(-1, 1), labels)
+        self.model = model
+
+    def transform(self, raw_probabilities: np.ndarray) -> np.ndarray:
+        if self.model is None:
+            return raw_probabilities
+        return self.model.predict_proba(raw_probabilities.reshape(-1, 1))[:, 1]
+
+
+def _constant_probability(labels: np.ndarray, size: int) -> np.ndarray:
+    return np.full(size, float(np.mean(labels)) if len(labels) else 0.5)
+
+
+def _fit_model(
+    x_train: pd.DataFrame,
+    y_train: np.ndarray,
+    x_validation: pd.DataFrame,
+    y_validation: np.ndarray,
+    parameters: RuntimeParameters,
+) -> XGBClassifier | None:
+    if len(np.unique(y_train)) < 2:
+        return None
+    positive = max(1, int(y_train.sum()))
+    negative = max(1, int(len(y_train) - positive))
+    model = XGBClassifier(
+        objective=parameters.string("xgboost.objective"),
+        eval_metric=parameters.string("xgboost.eval_metric"),
+        tree_method=parameters.string("xgboost.tree_method"),
+        n_estimators=parameters.integer("xgboost.n_estimators"),
+        max_depth=parameters.integer("xgboost.max_depth"),
+        learning_rate=parameters.floating("xgboost.learning_rate"),
+        min_child_weight=parameters.floating("xgboost.min_child_weight"),
+        subsample=parameters.floating("xgboost.subsample"),
+        colsample_bytree=parameters.floating("xgboost.colsample_bytree"),
+        gamma=parameters.floating("xgboost.gamma"),
+        reg_alpha=parameters.floating("xgboost.reg_alpha"),
+        reg_lambda=parameters.floating("xgboost.reg_lambda"),
+        scale_pos_weight=negative / positive,
+        random_state=parameters.integer("xgboost.random_state"),
+        n_jobs=parameters.integer("xgboost.n_jobs"),
+        early_stopping_rounds=parameters.integer("xgboost.early_stopping_rounds"),
+    )
+    model.fit(x_train, y_train, eval_set=[(x_validation, y_validation)], verbose=False)
+    return model
+
+
+def walk_forward_predict(
+    frame: pd.DataFrame,
+    parameters: RuntimeParameters,
+    progress: Callable[[int, str], None],
+    cancelled: Callable[[], bool],
+) -> tuple[pd.DataFrame, dict]:
+    columns = feature_names(parameters)
+    usable = frame.dropna(subset=[*columns, "entry_label", "exit_label"]).copy()
+    usable.reset_index(drop=True, inplace=True)
+    minimum_usable = parameters.integer("walk_forward.minimum_usable_candles")
+    if len(usable) < minimum_usable:
+        raise ValueError(
+            f"Only {len(usable)} usable candles remain after feature engineering; "
+            f"the database parameter walk_forward.minimum_usable_candles requires {minimum_usable}."
+        )
+
+    initial_train = max(
+        parameters.integer("walk_forward.initial_train_minimum"),
+        int(len(usable) * parameters.floating("walk_forward.initial_train_fraction")),
+    )
+    if initial_train >= len(usable):
+        raise ValueError("The database walk-forward parameters leave no out-of-sample candles.")
+
+    remaining = len(usable) - initial_train
+    fold_count = min(
+        parameters.integer("walk_forward.maximum_folds"),
+        max(
+            parameters.integer("walk_forward.minimum_folds"),
+            remaining // parameters.integer("walk_forward.fold_size_divisor"),
+        ),
+    )
+    fold_size = max(
+        parameters.integer("walk_forward.minimum_fold_size"),
+        remaining // max(1, fold_count),
+    )
+    predictions: list[pd.DataFrame] = []
+    importance_accumulator = np.zeros(len(columns), dtype=float)
+    trained_models = 0
+    solver = parameters.string("xgboost.calibration_solver")
+
+    for fold in range(fold_count):
+        if cancelled():
+            raise InterruptedError("Backtest cancellation requested")
+        train_end = initial_train + fold * fold_size
+        test_end = len(usable) if fold == fold_count - 1 else min(len(usable), train_end + fold_size)
+        if test_end - train_end < parameters.integer("walk_forward.minimum_test_size"):
+            continue
+        train_block = usable.iloc[:train_end]
+        validation_size = max(
+            parameters.integer("walk_forward.validation_minimum"),
+            int(len(train_block) * parameters.floating("walk_forward.validation_fraction")),
+        )
+        if validation_size >= len(train_block):
+            continue
+        training = train_block.iloc[:-validation_size]
+        validation = train_block.iloc[-validation_size:]
+        testing = usable.iloc[train_end:test_end].copy()
+
+        x_train = training[columns]
+        x_validation = validation[columns]
+        x_test = testing[columns]
+
+        entry_train = training["entry_label"].to_numpy(int)
+        entry_validation = validation["entry_label"].to_numpy(int)
+        exit_train = training["exit_label"].to_numpy(int)
+        exit_validation = validation["exit_label"].to_numpy(int)
+
+        entry_model = _fit_model(x_train, entry_train, x_validation, entry_validation, parameters)
+        exit_model = _fit_model(x_train, exit_train, x_validation, exit_validation, parameters)
+
+        if entry_model is None:
+            raw_entry_validation = _constant_probability(entry_train, len(validation))
+            raw_entry_test = _constant_probability(entry_train, len(testing))
+        else:
+            raw_entry_validation = entry_model.predict_proba(x_validation)[:, 1]
+            raw_entry_test = entry_model.predict_proba(x_test)[:, 1]
+            importance_accumulator += entry_model.feature_importances_
+            trained_models += 1
+
+        if exit_model is None:
+            raw_exit_validation = _constant_probability(exit_train, len(validation))
+            raw_exit_test = _constant_probability(exit_train, len(testing))
+        else:
+            raw_exit_validation = exit_model.predict_proba(x_validation)[:, 1]
+            raw_exit_test = exit_model.predict_proba(x_test)[:, 1]
+            importance_accumulator += exit_model.feature_importances_
+            trained_models += 1
+
+        entry_calibrator = ProbabilityCalibrator(solver=solver)
+        entry_calibrator.fit(raw_entry_validation, entry_validation)
+        exit_calibrator = ProbabilityCalibrator(solver=solver)
+        exit_calibrator.fit(raw_exit_validation, exit_validation)
+        testing["entry_probability"] = entry_calibrator.transform(raw_entry_test)
+        testing["exit_probability"] = exit_calibrator.transform(raw_exit_test)
+        testing["walk_forward_fold"] = fold + 1
+        predictions.append(testing)
+        progress(45 + int(28 * (fold + 1) / fold_count), f"Walk-forward fold {fold + 1}/{fold_count}")
+
+    if not predictions:
+        raise ValueError("No valid walk-forward test folds could be created from the database parameters.")
+
+    out_of_sample = pd.concat(predictions, ignore_index=True).sort_values("timestamp")
+    out_of_sample.drop_duplicates(subset=["timestamp"], keep="last", inplace=True)
+    average_importance = importance_accumulator / max(1, trained_models)
+    feature_importance = sorted(
+        [
+            {"feature": feature, "importance": round(float(value), 6)}
+            for feature, value in zip(columns, average_importance, strict=True)
+        ],
+        key=lambda item: item["importance"],
+        reverse=True,
+    )[: parameters.integer("walk_forward.feature_importance_limit")]
+    return out_of_sample.reset_index(drop=True), {
+        "fold_count": int(out_of_sample["walk_forward_fold"].max()),
+        "feature_importance": feature_importance,
+        "feature_columns": columns,
+    }
+
+
+def _safe_model_metrics(
+    labels: np.ndarray,
+    probabilities: np.ndarray,
+    threshold: float,
+    parameters: RuntimeParameters,
+) -> dict:
+    epsilon = parameters.floating("simulation.probability_clip_epsilon")
+    clipped = np.clip(probabilities, epsilon, 1 - epsilon)
+    predicted = (clipped >= threshold).astype(int)
+    both_classes = len(np.unique(labels)) > 1
+    brier = float(brier_score_loss(labels, clipped))
+    return {
+        "precision": round(float(precision_score(labels, predicted, zero_division=0)), 4),
+        "pr_auc": round(float(average_precision_score(labels, clipped)), 4) if both_classes else None,
+        "log_loss": round(float(log_loss(labels, clipped, labels=[0, 1])), 4),
+        "brier_score": round(brier, 4),
+        "calibration": (
+            "GOOD"
+            if brier <= parameters.floating("simulation.calibration_good_brier")
+            else "REVIEW"
+        ),
+    }
+
+
+def simulate_portfolio(
+    frame: pd.DataFrame,
+    request: ResolvedMLBacktestCreate,
+    parameters: RuntimeParameters,
+) -> dict:
+    cash = request.initial_capital
+    quantity = 0.0
+    entry_price = 0.0
+    entry_time = None
+    position_allocation = 0.0
+    stop_price = 0.0
+    target_price = 0.0
+    fees_paid = 0.0
+    trades: list[dict] = []
+    equity_rows: list[dict] = []
+    exposed_bars = 0
+    pending_action: str | None = None
+    pending_reason: str | None = None
+
+    atr_name = atr_column(parameters)
+    _, medium_ema, slow_ema = signal_ema_columns(parameters)
+    minimum_atr_fraction = parameters.floating("simulation.minimum_atr_price_fraction")
+    initial_stop_atr = parameters.floating("simulation.initial_stop_atr")
+    initial_target_atr = parameters.floating("simulation.initial_target_atr")
+    trailing_stop_atr = parameters.floating("simulation.trailing_stop_atr")
+    minimum_trend_gap = parameters.floating("simulation.minimum_trend_gap")
+
+    first_close = float(frame.iloc[0]["close"])
+    for index, row in frame.iterrows():
+        open_price = float(row["open"])
+        close_price = float(row["close"])
+        atr = max(float(row[atr_name]), close_price * minimum_atr_fraction)
+
+        if pending_action == "BUY" and quantity == 0:
+            allocation = cash if request.reinvestment else min(cash, request.initial_capital)
+            execution = open_price * (1 + request.slippage_rate)
+            entry_fee = allocation * request.fee_rate
+            quantity = max(0.0, (allocation - entry_fee) / execution)
+            cash -= allocation
+            fees_paid += entry_fee
+            position_allocation = allocation
+            entry_price = execution
+            entry_time = row["timestamp"]
+            stop_price = entry_price - initial_stop_atr * atr
+            target_price = entry_price + initial_target_atr * atr
+            pending_action = None
+        elif pending_action == "SELL" and quantity > 0:
+            execution = open_price * (1 - request.slippage_rate)
+            gross = quantity * execution
+            exit_fee = gross * request.fee_rate
+            net_exit = gross - exit_fee
+            cash += net_exit
+            fees_paid += exit_fee
+            pnl = net_exit - position_allocation
+            trades.append(
+                {
+                    "entry_time": pd.Timestamp(entry_time).isoformat(),
+                    "exit_time": pd.Timestamp(row["timestamp"]).isoformat(),
+                    "entry_price": round(entry_price, 8),
+                    "exit_price": round(execution, 8),
+                    "net_pnl": round(pnl, 4),
+                    "return_pct": round((net_exit / position_allocation - 1) * 100, 4),
+                    "reason": pending_reason or "MODEL_EXIT",
+                }
+            )
+            quantity = 0.0
+            entry_price = 0.0
+            entry_time = None
+            position_allocation = 0.0
+            pending_action = None
+            pending_reason = None
+
+        if quantity > 0:
+            exposed_bars += 1
+            intrabar_exit: tuple[float, str] | None = None
+            if float(row["low"]) <= stop_price:
+                intrabar_exit = (stop_price * (1 - request.slippage_rate), "PROTECTIVE_STOP")
+            elif float(row["high"]) >= target_price:
+                intrabar_exit = (target_price * (1 - request.slippage_rate), "TARGET")
+
+            if intrabar_exit:
+                execution, reason = intrabar_exit
+                gross = quantity * execution
+                exit_fee = gross * request.fee_rate
+                net_exit = gross - exit_fee
+                cash += net_exit
+                fees_paid += exit_fee
+                pnl = net_exit - position_allocation
+                trades.append(
+                    {
+                        "entry_time": pd.Timestamp(entry_time).isoformat(),
+                        "exit_time": pd.Timestamp(row["timestamp"]).isoformat(),
+                        "entry_price": round(entry_price, 8),
+                        "exit_price": round(execution, 8),
+                        "net_pnl": round(pnl, 4),
+                        "return_pct": round((net_exit / position_allocation - 1) * 100, 4),
+                        "reason": reason,
+                    }
+                )
+                quantity = 0.0
+                entry_price = 0.0
+                entry_time = None
+                position_allocation = 0.0
+                pending_action = None
+                pending_reason = None
+            else:
+                stop_price = max(stop_price, close_price - trailing_stop_atr * atr)
+
+        if index < len(frame) - 1:
+            if quantity == 0 and pending_action is None:
+                trend_ok = (
+                    float(row[medium_ema]) > float(row[slow_ema])
+                    and float(row["trend_ema_gap"]) > minimum_trend_gap
+                )
+                if float(row["entry_probability"]) >= request.entry_threshold and trend_ok:
+                    pending_action = "BUY"
+                    pending_reason = "XGB_ENTRY"
+            elif quantity > 0 and pending_action is None:
+                model_exit = float(row["exit_probability"]) >= request.exit_threshold
+                trend_lost = close_price < float(row[medium_ema])
+                if model_exit or trend_lost:
+                    pending_action = "SELL"
+                    pending_reason = "XGB_EXIT" if model_exit else "TREND_INVALIDATION"
+
+        equity = cash + quantity * close_price
+        buy_hold = request.initial_capital * close_price / first_close
+        equity_rows.append(
+            {
+                "timestamp": pd.Timestamp(row["timestamp"]).isoformat(),
+                "equity": equity,
+                "buy_hold": buy_hold,
+            }
+        )
+
+    if quantity > 0:
+        final_row = frame.iloc[-1]
+        execution = float(final_row["close"]) * (1 - request.slippage_rate)
+        gross = quantity * execution
+        exit_fee = gross * request.fee_rate
+        net_exit = gross - exit_fee
+        cash += net_exit
+        fees_paid += exit_fee
+        pnl = net_exit - position_allocation
+        trades.append(
+            {
+                "entry_time": pd.Timestamp(entry_time).isoformat(),
+                "exit_time": pd.Timestamp(final_row["timestamp"]).isoformat(),
+                "entry_price": round(entry_price, 8),
+                "exit_price": round(execution, 8),
+                "net_pnl": round(pnl, 4),
+                "return_pct": round((net_exit / position_allocation - 1) * 100, 4),
+                "reason": "END_OF_TEST",
+            }
+        )
+        equity_rows[-1]["equity"] = cash
+
+    return {
+        "capital_final": cash,
+        "fees_paid": fees_paid,
+        "trades": trades,
+        "equity_curve": equity_rows,
+        "exposure": exposed_bars / max(1, len(frame)),
+    }
+
+
+def _max_drawdown(values: np.ndarray) -> float:
+    peaks = np.maximum.accumulate(values)
+    drawdowns = values / np.where(peaks == 0, 1, peaks) - 1
+    return float(np.min(drawdowns))
+
+
+def calculate_results(
+    frame: pd.DataFrame,
+    request: ResolvedMLBacktestCreate,
+    simulation: dict,
+    model_metadata: dict,
+    parameters: RuntimeParameters,
+) -> dict:
+    equity = np.array([row["equity"] for row in simulation["equity_curve"]], dtype=float)
+    buy_hold_curve = np.array([row["buy_hold"] for row in simulation["equity_curve"]], dtype=float)
+    returns = pd.Series(equity).pct_change().dropna().to_numpy()
+    downside = returns[returns < 0]
+    periods_per_year = 365.25 * 86400 / TIMEFRAME_SECONDS[request.decision_timeframe]
+    sharpe = (
+        float(np.mean(returns) / np.std(returns) * math.sqrt(periods_per_year))
+        if len(returns) > 2 and np.std(returns) > 0
+        else 0.0
+    )
+    sortino = (
+        float(np.mean(returns) / np.std(downside) * math.sqrt(periods_per_year))
+        if len(downside) > 2 and np.std(downside) > 0
+        else 0.0
+    )
+    start = pd.Timestamp(frame.iloc[0]["timestamp"])
+    end = pd.Timestamp(frame.iloc[-1]["timestamp"])
+    years = max((end - start).total_seconds() / (365.25 * 86400), 1 / 365.25)
+    capital_final = float(simulation["capital_final"])
+    total_return = capital_final / request.initial_capital - 1
+    cagr = (capital_final / request.initial_capital) ** (1 / years) - 1 if capital_final > 0 else -1
+    trades = simulation["trades"]
+    wins = [trade for trade in trades if trade["net_pnl"] > 0]
+    losses = [trade for trade in trades if trade["net_pnl"] <= 0]
+    gross_profit = sum(trade["net_pnl"] for trade in wins)
+    gross_loss = abs(sum(trade["net_pnl"] for trade in losses))
+
+    entry_metrics = _safe_model_metrics(
+        frame["entry_label"].to_numpy(int),
+        frame["entry_probability"].to_numpy(float),
+        request.entry_threshold,
+        parameters,
+    )
+    exit_metrics = _safe_model_metrics(
+        frame["exit_label"].to_numpy(int),
+        frame["exit_probability"].to_numpy(float),
+        request.exit_threshold,
+        parameters,
+    )
+
+    maximum_points = parameters.integer("simulation.equity_curve_points")
+    sample_step = max(1, len(simulation["equity_curve"]) // maximum_points)
+    sampled_curve = simulation["equity_curve"][::sample_step]
+    if sampled_curve[-1] != simulation["equity_curve"][-1]:
+        sampled_curve.append(simulation["equity_curve"][-1])
+
+    maximum_trades = parameters.integer("simulation.maximum_stored_trades")
+    insight_features = parameters.integer("simulation.insight_top_features")
+    return {
+        "summary": {
+            "capital_initial": request.initial_capital,
+            "capital_final": round(capital_final, 4),
+            "return_total": round(total_return, 6),
+            "cagr": round(cagr, 6),
+            "max_drawdown": round(_max_drawdown(equity), 6),
+            "sharpe": round(sharpe, 4),
+            "sortino": round(sortino, 4),
+            "profit_factor": round(gross_profit / gross_loss, 4) if gross_loss > 0 else None,
+            "trade_count": len(trades),
+            "win_rate": round(len(wins) / len(trades), 6) if trades else 0.0,
+            "exposure": round(float(simulation["exposure"]), 6),
+            "fees_paid": round(float(simulation["fees_paid"]), 4),
+            "best_trade": max((trade["net_pnl"] for trade in trades), default=0.0),
+            "worst_trade": min((trade["net_pnl"] for trade in trades), default=0.0),
+        },
+        "execution": {
+            "candles_used": len(frame),
+            "period_start": start.isoformat(),
+            "period_end": end.isoformat(),
+            "duration_years": round(years, 3),
+            "walk_forward_folds": model_metadata["fold_count"],
+            "decision_timeframe": request.decision_timeframe,
+            "trend_timeframe": request.trend_timeframe,
+            "parameter_source": "DATABASE_SNAPSHOT",
+        },
+        "models": {
+            "entry": entry_metrics,
+            "exit": exit_metrics,
+            "feature_importance": model_metadata["feature_importance"],
+        },
+        "comparisons": [
+            {
+                "code": "XGBOOST_WALK_FORWARD",
+                "name": "XGBoost Walk-Forward",
+                "capital_final": round(capital_final, 4),
+                "return_total": round(total_return, 6),
+                "max_drawdown": round(_max_drawdown(equity), 6),
+                "sharpe": round(sharpe, 4),
+            },
+            {
+                "code": "BUY_AND_HOLD",
+                "name": "Buy and Hold",
+                "capital_final": round(float(buy_hold_curve[-1]), 4),
+                "return_total": round(float(buy_hold_curve[-1] / request.initial_capital - 1), 6),
+                "max_drawdown": round(_max_drawdown(buy_hold_curve), 6),
+                "sharpe": None,
+            },
+        ],
+        "trades": trades[-maximum_trades:],
+        "equity_curve": sampled_curve,
+        "insights": {
+            "top_features": [
+                item["feature"] for item in model_metadata["feature_importance"][:insight_features]
+            ],
+            "entry_threshold": request.entry_threshold,
+            "exit_threshold": request.exit_threshold,
+            "beats_buy_and_hold": capital_final > float(buy_hold_curve[-1]),
+        },
+    }
+
+
+def run_ml_backtest(
+    request: ResolvedMLBacktestCreate,
+    parameters: RuntimeParameters,
+    progress: Callable[[int, str], None],
+    cancelled: Callable[[], bool],
+) -> dict:
+    client = MEXCHistoryClient(parameters, __version__)
+    try:
+        progress(3, "Downloading decision-timeframe history")
+        decision = client.fetch_history(
+            symbol=request.symbol,
+            timeframe=request.decision_timeframe,
+            period_years=request.period_years,
+            progress=lambda value: progress(3 + int(value * 0.10), "Downloading decision-timeframe history"),
+            cancelled=cancelled,
+        )
+        if request.trend_timeframe == request.decision_timeframe:
+            trend = decision
+        else:
+            progress(14, "Downloading trend-timeframe history")
+            trend = client.fetch_history(
+                symbol=request.symbol,
+                timeframe=request.trend_timeframe,
+                period_years=request.period_years,
+                progress=lambda value: progress(14 + int(value * 0.07), "Downloading trend-timeframe history"),
+                cancelled=cancelled,
+            )
+        progress(24, "Calculating technical indicators")
+        featured = build_features(decision, parameters, trend)
+        progress(32, "Creating entry and exit labels")
+        labelled = create_labels(featured, parameters)
+        progress(40, "Preparing walk-forward validation")
+        predicted, metadata = walk_forward_predict(labelled, parameters, progress, cancelled)
+        progress(80, "Simulating out-of-sample operations")
+        simulation = simulate_portfolio(predicted, request, parameters)
+        progress(92, "Calculating financial and model metrics")
+        result = calculate_results(predicted, request, simulation, metadata, parameters)
+        progress(100, "Completed")
+        return result
+    finally:
+        client.close()

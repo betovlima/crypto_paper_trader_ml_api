@@ -1,0 +1,10 @@
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.34,<1.0
+httpx>=0.28,<1.0
+pydantic>=2.10,<3.0
+pydantic-settings>=2.7,<3.0
+sqlalchemy>=2.0,<3.0
+pandas>=2.2,<4.0
+numpy>=2.0,<3.0
+scikit-learn>=1.6,<2.0
+xgboost>=2.1,<4.0
