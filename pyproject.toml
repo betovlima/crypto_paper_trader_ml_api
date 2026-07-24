@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "crypto-paper-trader-ml-api"
-version = "0.2.1"
+version = "0.2.2"
 description = "Independent XGBoost walk-forward backtest API for Crypto Paper Trader."
 authors = ["Roberto"]
 readme = "README.md"

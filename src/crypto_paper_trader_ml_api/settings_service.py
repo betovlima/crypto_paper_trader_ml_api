@@ -108,6 +108,17 @@ def synchronize_parameter_catalog() -> None:
         }
         for seed in seed_rows:
             if seed["key"] in existing_keys:
+                if seed["key"] == "api.cors_origins":
+                    existing = session.get(MLRuntimeParameter, seed["key"])
+                    if existing is not None:
+                        current_values = json.loads(existing.value_json)
+                        seed_values = json.loads(seed["value_json"])
+                        merged_values = list(dict.fromkeys([*current_values, *seed_values]))
+                        if merged_values != current_values:
+                            existing.value_json = json.dumps(merged_values)
+                            existing.updated_at = now
+                        existing.requires_restart = False
+                        existing.description = seed["description"]
                 continue
             session.add(
                 MLRuntimeParameter(

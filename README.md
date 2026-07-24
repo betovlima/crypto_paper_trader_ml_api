@@ -2,7 +2,7 @@
 
 Independent API for long-period XGBoost walk-forward backtests. It is separate from the paper-trading API and never sends real orders.
 
-## Version 0.2.1 — explicit-window MEXC history pagination
+## Version 0.2.2 — database-backed Railway CORS and explicit-window pagination
 
 ### MEXC history collection fix
 
@@ -101,3 +101,7 @@ VITE_ML_API_URL=https://YOUR-ML-API.up.railway.app
 ```
 
 These values are network addresses required to locate the services. They are not trading or Machine Learning parameters.
+
+### CORS in Railway
+
+Version 0.2.2 resolves CORS origins dynamically from `api.cors_origins` in the runtime database. The production frontend origin is included in the seed catalog and merged into existing runtime databases during startup. Changing the parameter no longer requires a service restart.

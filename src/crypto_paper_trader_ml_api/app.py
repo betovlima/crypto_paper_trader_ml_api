@@ -4,9 +4,9 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__
+from .cors import DatabaseCORSMiddleware
 from .database import initialize_database
 from .schemas import (
     HealthResponse,
@@ -29,7 +29,6 @@ from .settings_service import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 initialize_database()
-startup_parameters = get_runtime_parameters()
 
 
 @asynccontextmanager
@@ -47,9 +46,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[str(value) for value in startup_parameters.list("api.cors_origins")],
-    allow_credentials=False,
+    DatabaseCORSMiddleware,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )

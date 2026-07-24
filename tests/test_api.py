@@ -19,3 +19,22 @@ def test_health_and_database_configuration() -> None:
     assert configuration.json()["ui"]["job_poll_interval_ms"] > 0
     assert settings.status_code == 200
     assert len(settings.json()["parameters"]) > 50
+
+
+def test_railway_frontend_origin_is_allowed_without_restart() -> None:
+    origin = "https://cryptopapertraderfront-production.up.railway.app"
+    with TestClient(app) as client:
+        preflight = client.options(
+            "/v1/ml-backtests",
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        health = client.get("/health", headers={"Origin": origin})
+
+    assert preflight.status_code == 200
+    assert preflight.headers["access-control-allow-origin"] == origin
+    assert health.status_code == 200
+    assert health.headers["access-control-allow-origin"] == origin
