@@ -13,6 +13,7 @@ from zipfile import ZipFile
 
 from .archive_replay import compare_archives
 from .mexc import TIMEFRAME_SECONDS
+from .btc_policy import aggregate_signals, simulate_rotations, validate_policy
 
 
 def _utc(value: str) -> datetime:
@@ -240,7 +241,12 @@ def compare_capitalization(
     horizon: int, initial_capital: float, fee_rate: float,
     slippage_rate: float, entry_edge: float,
     min_probability: float, exit_return: float,
+    optimized_policy: dict | None = None,
 ) -> dict:
+    if optimized_policy is not None:
+        validate_policy(optimized_policy)
+        if horizon != 0:
+            raise ValueError("A política otimizada usa conjuntamente 2h+6h+24h; não pode ser aplicada a horizonte isolado")
     if horizon not in {0, 2, 6, 24}:
         raise ValueError("Horizonte deve ser conjunto 2h+6h+24h ou individual 2h, 6h ou 24h")
     if not (math.isfinite(initial_capital) and initial_capital > 0):
@@ -263,7 +269,10 @@ def compare_capitalization(
             if sources[h].keys() != candidates[h].keys():
                 raise ValueError(f"Sinais OOS originais e replay diferem para {h}h")
         source = _joint_signals(sources)
-        candidate = _joint_signals(candidates)
+        candidate = (
+            aggregate_signals(candidates, optimized_policy)
+            if optimized_policy is not None else _joint_signals(candidates)
+        )
         if source.keys() != candidate.keys():
             raise ValueError("O conjunto de decisões OOS não coincide entre modelos")
     else:
@@ -278,11 +287,26 @@ def compare_capitalization(
                   bar_seconds=seconds,
                   slippage=slippage_rate, edge=entry_edge,
                   min_probability=min_probability, exit_return=exit_return)
-    results = [
-        _summary_series(candles, source, baseline=False, label="V1", **common),
-        _summary_series(candles, candidate, baseline=False, label="V2", **common),
-        _summary_series(candles, {}, baseline=True, label="BUY_AND_HOLD", **common),
-    ]
+    if optimized_policy is not None:
+        # Same causal engine used for model/policy selection before OOS.
+        # Both fee and slippage come from the same user's replay settings.
+        challenger = simulate_rotations(
+            candles, candidate, optimized_policy,
+            initial_capital=initial_capital, fee=fee_rate,
+            slippage=slippage_rate, bar_seconds=seconds,
+            label="BTC_CASH_ROTATION",
+        )
+        buy_hold = _summary_series(
+            candles, {}, baseline=True, label="BUY_AND_HOLD", **common
+        )
+        results = [challenger, buy_hold]
+    else:
+        # Historical research replays retain their previous behavior.
+        results = [
+            _summary_series(candles, source, baseline=False, label="V1", **common),
+            _summary_series(candles, candidate, baseline=False, label="V2", **common),
+            _summary_series(candles, {}, baseline=True, label="BUY_AND_HOLD", **common),
+        ]
     return {
         "status": "VERIFIED",
         "comparison": {k: verified[k] for k in (
@@ -298,6 +322,9 @@ def compare_capitalization(
         "period_start": candles[start]["timestamp"].isoformat(),
         "period_end": candles[end]["timestamp"].isoformat(),
         "signal_count": len(source),
+        "optimized_policy": validate_policy(optimized_policy) if optimized_policy else None,
+        "portfolio_rule": "Single BTC/CASH portfolio with reinvestment, model exit, stop, trailing, take profit and cooldown" if optimized_policy else None,
+
         "original_archive_sha256": sha256(original).hexdigest(),
         "replay_archive_sha256": sha256(replay).hexdigest(),
         "parameters": {
@@ -306,5 +333,10 @@ def compare_capitalization(
             "min_probability": min_probability, "exit_return": exit_return,
         },
         "results": results,
-        "note": "Simulação OOS de política conjunta 2h+6h+24h com pesos e consenso fixos, sem otimização sobre OOS. Nenhuma ordem real." if horizon == 0 else "Simulação histórica individual OOS, sem execução real nem otimização nos testes.",
+        "note": (
+            "Política BTC/CASH otimizada somente antes do OOS, com reinvestimento e custos. Nenhuma ordem real."
+            if optimized_policy else
+            "Simulação OOS de consenso fixo 2h+6h+24h, sem ajuste no período OOS."
+            if horizon == 0 else "Simulação histórica individual OOS, sem negociação real."
+        ),
     }
