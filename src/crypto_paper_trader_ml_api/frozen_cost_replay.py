@@ -138,6 +138,11 @@ def replay_frozen_rotations(
         / values[j * (len(values) - 1) // blocks] - 1
         for j in range(blocks)
     ] if blocks else []
+    segment_cycle_counts = [0, 0, 0]
+    for action in performed:
+        if action["action"] == "SELL":
+            slot = min(2, 3 * (action["candle_index"] - first) // len(values))
+            segment_cycle_counts[slot] += 1
     schedule = [
         (a["candle_index"], a["timestamp"], a["action"], a.get("reason"))
         for a in baseline_actions
@@ -158,6 +163,7 @@ def replay_frozen_rotations(
         "segment_returns": segment_returns,
         "sharpe": float(sharpe),
         "completed_cycles": cycles,
+        "segment_cycle_counts": segment_cycle_counts,
         "switch_count": len(performed),
         "frozen_schedule": True,
         "same_trade_schedule": True,
