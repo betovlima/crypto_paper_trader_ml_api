@@ -81,6 +81,15 @@ def build_direction_audit_archive(
         "market_archive_checksums": source_archives,
         "prediction_target": "P(close[t+h] > close[t]) and simple close-to-close return",
         "model_selection": "chronological train / early-stop / calibrate / purged OOS",
+        "replay_original_audit_sha256": result["execution"].get(
+            "replay_original_audit_sha256"
+        ),
+        "regression_target_scale": result.get("insights", {}).get(
+            "regression_target_scale"
+        ),
+        "diagnostics_version": 2 if result.get("insights", {}).get(
+            "model_diagnostics"
+        ) else 1,
         "unsampled": True,
     }
     buffer = BytesIO()

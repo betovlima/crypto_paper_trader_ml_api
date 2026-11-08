@@ -373,11 +373,12 @@ def run_direction_backtest(
     request: ResolvedMLBacktestCreate, parameters: RuntimeParameters,
     progress: Callable[[int, str], None], cancelled: Callable[[], bool],
     audit_writer: Callable[[bytes], None] | None = None,
+    historical_client: object | None = None,
 ) -> dict:
     """A forecasting research job; deliberately no portfolio simulation."""
     if request.experiment_type != EXPERIMENT or request.symbol != "BTCUSDT":
         raise ValueError("Direct BTC forecast requires the BTC_DIRECTION_RETURN experiment")
-    client = (
+    client = historical_client if historical_client is not None else (
         BinancePublicArchiveClient(parameters, __version__)
         if request.history_source == "BINANCE_SPOT_ARCHIVE"
         else MEXCHistoryClient(parameters, __version__)
@@ -481,6 +482,9 @@ def run_direction_backtest(
                 "forecast_horizons_hours": horizons,
                 "fold_windows": window_metadata,
                 "parameter_source": "DATABASE_SNAPSHOT",
+                "replay_original_audit_sha256": getattr(
+                    client, "replay_source_sha256", None
+                ),
             },
             "forecast": {"horizons": outputs},
             "comparisons": [],
