@@ -525,12 +525,13 @@ def export_strategy_report(strategy_id: str) -> bytes:
         csv_buffer = StringIO()
         writer = csv.writer(csv_buffer)
         writer.writerow(["trial", "status", "score", "capital_final", "max_drawdown",
-                         "brier", "mae", "parameters_json", "error"])
+                         "sharpe", "worst_fold_return", "brier", "mae", "parameters_json", "error"])
         for item in strategy["trials"]:
             metrics = item.get("metrics") or {}
             writer.writerow([
                 item["trial"], item["status"], metrics.get("score"),
                 metrics.get("capital_final"), metrics.get("max_drawdown"),
+                metrics.get("sharpe"), metrics.get("worst_fold_return"),
                 metrics.get("brier"), metrics.get("mae"),
                 json.dumps(item["parameters"], sort_keys=True), item.get("error"),
             ])
