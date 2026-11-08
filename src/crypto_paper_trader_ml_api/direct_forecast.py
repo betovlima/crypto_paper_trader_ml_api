@@ -511,6 +511,7 @@ def run_direction_backtest(
                 request=request, parameters=parameters,
                 result=result,
                 source_archives=getattr(client, "archive_manifest", None),
+                archived_market_bytes=getattr(client, "market_bytes", None),
             ))
         progress(100, "Completed")
         return result

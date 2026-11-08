@@ -35,6 +35,7 @@ def build_direction_audit_archive(
     trend_history: pd.DataFrame, request: ResolvedMLBacktestCreate,
     parameters: RuntimeParameters, result: dict,
     source_archives: dict | None,
+    archived_market_bytes: dict[str, bytes] | None = None,
 ) -> bytes:
     """Save every out-of-sample prediction as generated, with no reconstructed labels."""
     expected_horizons = [int(h) for h in parameters.list("forecast.horizons_hours")]
@@ -104,8 +105,18 @@ def build_direction_audit_archive(
             result["execution"].get("market_interruptions", {})
         ))
         archive.writestr("forecast_predictions_oos.csv", _csv(ordered))
-        archive.writestr("market_history_decision.csv", _csv(decision_history))
-        archive.writestr("market_history_trend.csv", _csv(trend_history))
+        # Replayed executions must retain exact archived OHLCV bytes so the
+        # resulting ZIP can prove bit-for-bit identical historical inputs.
+        archive.writestr(
+            "market_history_decision.csv",
+            archived_market_bytes["decision"]
+            if archived_market_bytes is not None else _csv(decision_history),
+        )
+        archive.writestr(
+            "market_history_trend.csv",
+            archived_market_bytes["trend"]
+            if archived_market_bytes is not None else _csv(trend_history),
+        )
         archive.writestr("README.txt", (
             "BTC DIRECTION / RETURN · AUDITORIA FORA DA AMOSTRA\n"
             "Este experimento NAO realiza compras ou vendas de BTC.\n"
