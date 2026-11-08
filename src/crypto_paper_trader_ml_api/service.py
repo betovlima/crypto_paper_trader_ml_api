@@ -11,6 +11,7 @@ from sqlalchemy import desc
 
 from .database import MLBacktestAudit, MLBacktestJob, SessionLocal
 from .engine import run_ml_backtest
+from .direct_forecast import run_direction_backtest
 from .schemas import MLBacktestCreate, ResolvedMLBacktestCreate
 from .settings_service import (
     RuntimeParameters,
@@ -49,6 +50,7 @@ def _serialize_job(job: MLBacktestJob, include_result: bool = False) -> dict:
         "progress": job.progress,
         "symbol": job.symbol,
         "history_source": json.loads(job.request_json).get("history_source", "MEXC"),
+        "experiment_type": json.loads(job.request_json).get("experiment_type", "TARGET_STOP"),
         "decision_timeframe": job.decision_timeframe,
         "trend_timeframe": job.trend_timeframe,
         "period_years": job.period_years,
@@ -70,6 +72,7 @@ def _serialize_job(job: MLBacktestJob, include_result: bool = False) -> dict:
 
 def _resolve_request(request: MLBacktestCreate, parameters: RuntimeParameters) -> ResolvedMLBacktestCreate:
     values = {
+        "experiment_type": request.experiment_type or parameters.string("backtest.default_experiment_type"),
         "symbol": request.symbol or parameters.string("backtest.default_symbol"),
         "history_source": request.history_source or parameters.string("backtest.default_history_source"),
         "period_years": (
@@ -151,6 +154,15 @@ def _resolve_request(request: MLBacktestCreate, parameters: RuntimeParameters) -
         raise ValueError("entry_threshold is outside the database limits")
     if not threshold_minimum <= resolved.exit_threshold <= threshold_maximum:
         raise ValueError("exit_threshold is outside the database limits")
+    if resolved.experiment_type == "BTC_DIRECTION_RETURN":
+        if resolved.symbol != "BTCUSDT":
+            raise ValueError("Direct direction/return research currently supports BTCUSDT only")
+        for horizon in parameters.list("forecast.horizons_hours"):
+            interval = int(horizon) * 3600
+            if interval % TIMEFRAME_SECONDS[resolved.decision_timeframe]:
+                raise ValueError(
+                    "Each forecast horizon must be an exact multiple of the decision candle"
+                )
     return resolved
 
 
@@ -247,7 +259,12 @@ def _run_job(job_id: str) -> None:
 
     try:
         archive_contents: list[bytes] = []
-        result = run_ml_backtest(
+        runner = (
+            run_direction_backtest
+            if request.experiment_type == "BTC_DIRECTION_RETURN"
+            else run_ml_backtest
+        )
+        result = runner(
             request,
             parameters,
             lambda value, stage: _update_progress(job_id, value, stage),

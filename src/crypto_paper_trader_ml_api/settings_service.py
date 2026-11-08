@@ -124,6 +124,23 @@ def synchronize_parameter_catalog() -> None:
                 display_order=110,
                 updated_at=now,
             ))
+        # Add direct forecast settings without replacing existing runtime choices.
+        forecast_defaults = [{"key":"backtest.default_experiment_type","category":"Backtest","label":"Default experiment type","description":"Choose independent direction/return research or the existing target/stop strategy.","value_type":"string","value":"TARGET_STOP","constraints":{"options":["TARGET_STOP","BTC_DIRECTION_RETURN"]},"public":true,"requires_restart":false,"display_order":111},{"key":"forecast.horizons_hours","category":"BTC Forecast","label":"Forecast horizons (hours)","description":"Future BTC closing-price return horizons in hours, all evaluated separately.","value_type":"integer_list","value":[2,6,24],"constraints":{"minimum":1,"maximum":72},"public":true,"requires_restart":false,"display_order":112},{"key":"forecast.maximum_folds","category":"BTC Forecast","label":"Maximum temporal folds","description":"Maximum number of independent chronological out-of-sample folds for direct BTC forecasts.","value_type":"integer","value":3,"constraints":{"minimum":2,"maximum":6},"public":true,"requires_restart":false,"display_order":113}]
+        for item in forecast_defaults:
+            if item["key"] not in existing_keys:
+                session.add(MLRuntimeParameter(
+                    key=item["key"],
+                    category=item["category"],
+                    label=item["label"],
+                    description=item["description"],
+                    value_type=item["value_type"],
+                    value_json=json.dumps(item["value"]),
+                    constraints_json=json.dumps(item["constraints"]),
+                    public=item["public"],
+                    requires_restart=item["requires_restart"],
+                    display_order=item["display_order"],
+                    updated_at=now,
+                ))
         for seed in seed_rows:
             if seed["key"] in existing_keys:
                 if seed["key"] == "api.cors_origins":
@@ -310,6 +327,16 @@ def _validate_cross_parameter_values(values: dict[str, Any]) -> None:
     if int(values["walk_forward.initial_train_minimum"]) >= int(values["walk_forward.minimum_usable_candles"]):
         raise ParameterValidationError("The initial training minimum must be lower than the minimum usable candles")
 
+    if values.get("backtest.default_experiment_type", "TARGET_STOP") not in {
+        "TARGET_STOP", "BTC_DIRECTION_RETURN",
+    }:
+        raise ParameterValidationError("Unsupported experiment type")
+    horizons = [int(value) for value in values.get("forecast.horizons_hours", [2, 6, 24])]
+    if not horizons or len(set(horizons)) != len(horizons) or any(h <= 0 or h > 72 for h in horizons):
+        raise ParameterValidationError("Forecast horizons must be unique and between 1 and 72 hours")
+    if not 2 <= int(values.get("forecast.maximum_folds", 3)) <= 6:
+        raise ParameterValidationError("Forecast maximum folds must be between 2 and 6")
+
     if values.get("backtest.default_history_source", "MEXC") not in {
         "MEXC", "BINANCE_SPOT_ARCHIVE",
     }:
@@ -405,6 +432,7 @@ def public_configuration_payload() -> dict[str, Any]:
         "source": "DATABASE",
         "defaults": {
             "symbol": runtime.string("backtest.default_symbol"),
+            "experiment_type": runtime.string("backtest.default_experiment_type"),
             "history_source": runtime.string("backtest.default_history_source"),
             "period_years": runtime.integer("backtest.default_period_years"),
             "decision_timeframe": runtime.string("backtest.default_decision_timeframe"),
@@ -427,6 +455,8 @@ def public_configuration_payload() -> dict[str, Any]:
         },
         "options": {
             "history_sources": ["MEXC", "BINANCE_SPOT_ARCHIVE"],
+            "experiment_types": ["TARGET_STOP", "BTC_DIRECTION_RETURN"],
+            "forecast_horizons_hours": runtime.list("forecast.horizons_hours"),
             "decision_timeframes": runtime.list("backtest.allowed_decision_timeframes"),
             "trend_timeframes": runtime.list("backtest.allowed_trend_timeframes"),
         },
