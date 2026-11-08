@@ -41,3 +41,17 @@ def test_timeframe_options_are_database_parameters() -> None:
         "backtest.allowed_trend_timeframes"
     )
     assert parameters.integer("frontend.job_poll_interval_ms") > 0
+
+
+
+def test_regressor_parameter_constraints_are_managed_in_runtime_database() -> None:
+    current = get_runtime_parameters()
+    assert current.floating("forecast.regression_target_scale") >= 1
+    assert 50 <= current.integer("forecast.bootstrap_samples") <= 1000
+    assert current.integer("forecast.regression_early_stopping_rounds") < (
+        current.integer("forecast.regression_n_estimators")
+    )
+    with pytest.raises(ParameterValidationError):
+        update_parameter_rows([{"key": "forecast.regression_target_scale", "value": 0.0}])
+    with pytest.raises(ParameterValidationError):
+        update_parameter_rows([{"key": "forecast.bootstrap_samples", "value": 1}])

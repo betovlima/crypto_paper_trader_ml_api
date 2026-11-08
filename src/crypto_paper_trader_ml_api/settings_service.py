@@ -317,6 +317,20 @@ def synchronize_parameter_catalog() -> None:
             "display_order": 123
           }
         ]
+        explanations = {
+            "forecast.regression_target_scale": "Factor multiplying simple BTC returns during XGBoost regression fit; predictions are divided back before export.",
+            "forecast.regression_n_estimators": "Upper limit on regression tree boosting rounds; early stopping may select fewer.",
+            "forecast.regression_max_depth": "Maximum number of successive splitting levels per regression tree.",
+            "forecast.regression_learning_rate": "Shrinkage applied to each added regression tree.",
+            "forecast.regression_min_child_weight": "Minimum Hessian weight required for an XGBoost regression split.",
+            "forecast.regression_gamma": "Minimum loss reduction required for each tree split, in scaled training-target units.",
+            "forecast.regression_reg_alpha": "L1 penalty applied to regression leaf weights.",
+            "forecast.regression_reg_lambda": "L2 penalty applied to regression leaf weights.",
+            "forecast.regression_early_stopping_rounds": "Stop if validation RMSE does not improve for this many boosting rounds.",
+            "forecast.bootstrap_samples": "Number of chronological block resamples for 95 percent OOS confidence intervals.",
+        }
+        for item in regression_defaults:
+            item["description"] = explanations[item["key"]]
         forecast_defaults.extend(regression_defaults)
         for item in forecast_defaults:
             if item["key"] not in existing_keys:

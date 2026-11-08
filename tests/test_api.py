@@ -26,6 +26,19 @@ def test_health_and_database_configuration() -> None:
     assert 2 <= visible["forecast.maximum_folds"]["value"] <= 6
     assert visible["backtest.default_experiment_type"]["value"] == configuration.json()["defaults"]["experiment_type"]
     assert configuration.json()["ui"]["job_poll_interval_ms"] > 0
+    assert settings.json()["source"] == "DATABASE"
+    keys = {item["key"]: item for item in settings.json()["parameters"]}
+    for key in (
+        "forecast.regression_target_scale",
+        "forecast.regression_n_estimators",
+        "forecast.regression_gamma",
+        "forecast.regression_reg_alpha",
+        "forecast.regression_early_stopping_rounds",
+        "forecast.bootstrap_samples",
+    ):
+        assert key in keys
+        assert keys[key]["description"]
+        assert keys[key]["public"] is True
     assert settings.status_code == 200
     assert len(settings.json()["parameters"]) > 50
 

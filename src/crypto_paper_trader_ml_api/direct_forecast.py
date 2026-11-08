@@ -100,6 +100,7 @@ def _regressor(
     )
     return model
 
+
 def _metrics(rows: pd.DataFrame) -> dict:
     """Measure directional and numerical forecast skill vs chronological baselines."""
     y = rows["forecast_realized_up"].to_numpy(int)

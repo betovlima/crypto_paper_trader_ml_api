@@ -79,6 +79,8 @@ def test_24hour_walk_forward_uses_separate_purged_train_early_stop_calibration_a
     params = default_parameters(**{
         "xgboost.n_estimators": 8,
         "xgboost.early_stopping_rounds": 3,
+        "forecast.regression_n_estimators": 20,
+        "forecast.regression_early_stopping_rounds": 3,
         "xgboost.n_jobs": 1,
         "forecast.maximum_folds": 2,
         "walk_forward.minimum_usable_candles": 300,
