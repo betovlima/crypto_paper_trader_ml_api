@@ -425,7 +425,7 @@ class BinancePublicArchiveClient:
                 "No synthetic candles or cross-exchange substitution were used."
             )
         diffs = frame["timestamp"].diff().dropna().dt.total_seconds()
-        if not diffs.eq(interval_seconds).all():
+        if not diffs.eq(interval_seconds).all() and not allowed_halts:
             bad = int((diffs != interval_seconds).sum())
             raise BinanceArchiveError(
                 f"Binance archive has {bad} missing or irregular {timeframe} candle intervals; "
