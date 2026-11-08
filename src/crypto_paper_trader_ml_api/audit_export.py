@@ -180,6 +180,7 @@ def build_audit_archive(
             "folds.json: fronteiras de treino, calibração e teste e intervalos de segurança.\n"
             "history_coverage.json: cobertura real dos dados, lacunas e limite da coleta.\n"
             "market_history_decision.csv e market_history_trend.csv: candles brutos utilizados (quando disponíveis).\n"
+            "market_interruptions.json: interrupções oficiais documentadas, horários não negociados e fonte verificável.\n"
 
         ).encode("utf-8"))
     return buffer.getvalue()

@@ -96,3 +96,28 @@ bordas da janela ou dentro da série. Agora a coleta:
 
 Essa correção preserva o rigor da pesquisa. Ela não garante que candles
 nunca negociados ou não publicados pela corretora possam ser recuperados.
+
+
+## Interrupção documentada em 24/03/2023
+
+A Binance publicou um comunicado oficial confirmando a suspensão de todas
+as negociações Spot em 24/03/2023 e o retorno às 14:00 UTC:
+
+https://www.binance.com/en/support/announcement/detail/813a31506e9f478ea8c1058b425df87a
+
+O arquivo mensal e o ZIP diário de BTCUSDT 30min não contêm os candles
+de 13:00 e 13:30 UTC. Isso está consistente com a interrupção.
+
+Esta única exceção documentada, e somente para BTCUSDT 30min na Binance
+Spot, permite um backtest com 70.376 registros reais em vez dos 70.378
+intervalos teóricos. O horário de cada candle ausente continua no
+\`market_interruptions.json\` e no \`history_coverage.json\`.
+
+Os indicadores de decisão são reiniciados depois da lacuna. Os rótulos
+que exigiriam observar preços através da suspensão não são usados
+no treinamento ou na avaliação. Nenhum candle artificial é criado.
+Todas as demais lacunas permanecem bloqueadas.
+
+\`FULL_WITH_DOCUMENTED_HALT\` descreve uma janela histórica integral,
+exceto a interrupção conhecida e contabilizada; não significa 70.378
+candles reais.
