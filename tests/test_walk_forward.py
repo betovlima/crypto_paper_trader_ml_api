@@ -29,7 +29,7 @@ def test_walk_forward_generates_out_of_sample_probabilities() -> None:
             "quote_volume": 0,
         }
     )
-    parameters = default_parameters(**{"xgboost.n_jobs": 1})
+    parameters = default_parameters(**{"lightgbm.n_jobs": 1})
     trend = frame.iloc[::8].reset_index(drop=True)
     labelled = create_labels(build_features(frame, parameters, trend), parameters)
     predicted, metadata = walk_forward_predict(
