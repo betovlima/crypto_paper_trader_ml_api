@@ -133,6 +133,8 @@ def test_one_optimization_campaign_evaluates_all_horizons_without_oos_leakage(mo
         test_start = pd.Timestamp("2024-02-01T00:00:00Z")
         dataset = pd.DataFrame({
             "timestamp": pd.date_range("2024-01-01", periods=6, freq="30min", tz="UTC"),
+            "open": [100., 100., 103., 107., 108., 110.],
+            "close": [100., 102., 105., 108., 110., 112.],
         })
 
         def fake_prepare(_archive, horizon, _parameters, cutoff):
@@ -152,6 +154,12 @@ def test_one_optimization_campaign_evaluates_all_horizons_without_oos_leakage(mo
                 "sharpe": 0.5,
                 "brier": 0.2,
                 "mae": 0.005,
+                "__policy_predictions": {
+                    pd.Timestamp(ts).isoformat(): {
+                        "predicted_return": 0.025 * horizon / 6.0, "p_up": 0.85,
+                    }
+                    for ts in prepared[3]["timestamp"]
+                },
             }
 
         monkeypatch.setattr(strategy_research, "_prepare", fake_prepare)
@@ -171,7 +179,10 @@ def test_one_optimization_campaign_evaluates_all_horizons_without_oos_leakage(mo
         assert len([h for typ, h in seen if typ == "score"]) == 12
         best = result["champion"]["metrics"]
         assert sorted(best["per_horizon"].keys()) == ["2", "24", "6"]
-        assert best["score_method"] == "0.70_mean_0.30_worst"
+        assert best["score_method"] == "joint_compounded_capital_risk_adjusted"
+        assert best["capital_note"].startswith("Um patrimônio")
+        assert best["policy"]["policy.entry_probability"] >= .5
+        assert best["switch_count"] >= 2
         assert result["summary"]["horizons_hours"] == [2, 6, 24]
         assert result["summary"]["oos_untouched_from"] == first.isoformat()
     finally:
