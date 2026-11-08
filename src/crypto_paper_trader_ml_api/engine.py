@@ -604,6 +604,7 @@ def calculate_results(
             "fold_windows": model_metadata.get("fold_windows", []),
             "label_horizon_candles": model_metadata.get("label_horizon_candles"),
             "history_coverage": model_metadata.get("history_coverage"),
+            "label_vs_execution": model_metadata.get("target_vs_simulation"),
         },
         "models": {
             "entry": entry_metrics,
@@ -684,11 +685,51 @@ def run_ml_backtest(
                 cancelled=cancelled,
             )
         progress(24, "Calculating technical indicators")
-        featured = build_features(decision, parameters, trend)
+        featured = build_features(
+            decision, parameters, trend,
+            decision_timeframe=request.decision_timeframe,
+            trend_timeframe=request.trend_timeframe,
+        )
         progress(32, "Creating entry and exit labels")
         labelled = create_labels(featured, parameters)
         progress(40, "Preparing walk-forward validation")
         predicted, metadata = walk_forward_predict(labelled, parameters, progress, cancelled)
+        expected_seconds = TIMEFRAME_SECONDS[request.decision_timeframe]
+        observed = pd.to_datetime(decision["timestamp"], utc=True)
+        interval_counts = observed.diff().dropna().dt.total_seconds() / expected_seconds
+        missing_intervals = int((interval_counts.round().clip(lower=1) - 1).sum())
+        requested_candles = int(math.ceil(
+            request.period_years * 365.25 * 86400 / expected_seconds
+        ))
+        raw_start = pd.Timestamp(observed.iloc[0])
+        raw_end = pd.Timestamp(observed.iloc[-1])
+        available_intervals = int(round(
+            (raw_end - raw_start).total_seconds() / expected_seconds
+        )) + 1
+        observed_coverage = min(1.0, available_intervals / max(1, requested_candles))
+        metadata["history_coverage"] = {
+            "requested_years": request.period_years,
+            "requested_candles": requested_candles,
+            "max_candles_parameter": parameters.integer("market.max_candles"),
+            "raw_candles": len(decision),
+            "raw_start": raw_start.isoformat(),
+            "raw_end": raw_end.isoformat(),
+            "raw_available_intervals": available_intervals,
+            "missing_intervals": missing_intervals,
+            "max_observed_interval_gap": float(interval_counts.max()) if len(interval_counts) else 0.0,
+            "requested_period_coverage_ratio": round(observed_coverage, 6),
+            "coverage_status": "FULL" if observed_coverage >= 0.99 and missing_intervals == 0 else "PARTIAL",
+            "oos_candles": len(predicted),
+            "oos_start": pd.Timestamp(predicted.iloc[0]["timestamp"]).isoformat(),
+            "oos_end": pd.Timestamp(predicted.iloc[-1]["timestamp"]).isoformat(),
+        }
+        metadata["target_vs_simulation"] = {
+            "label_horizon_candles": parameters.integer("labels.horizon_candles"),
+            "label_entry_target_atr": parameters.floating("labels.entry_target_atr"),
+            "label_entry_stop_atr": parameters.floating("labels.entry_stop_atr"),
+            "simulation_initial_target_atr": parameters.floating("simulation.initial_target_atr"),
+            "simulation_initial_stop_atr": parameters.floating("simulation.initial_stop_atr"),
+        }
         progress(80, "Simulating out-of-sample operations")
         simulation = simulate_portfolio(predicted, request, parameters)
         progress(92, "Calculating financial and model metrics")
