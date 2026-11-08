@@ -32,6 +32,10 @@ from .settings_service import get_runtime_parameters, get_runtime_parameters_fro
 from .engine import ProbabilityCalibrator
 from .btc_policy import DEFAULT_POLICY, aggregate_signals, simulate_rotations, validate_policy
 from .alpaca_fees import ALPACA_FEE_MODEL, AlpacaFeeLedger, round_trip_cost
+from .selection_robustness import (
+    assess_robustness, STRESS_FEE_MULTIPLIER, STRESS_SLIPPAGE_MULTIPLIER,
+    MIN_COMPLETED_CYCLES, MIN_ACTIVE_SEGMENTS, MIN_PROFITABLE_SEGMENTS,
+)
 
 
 # Expose an intentionally small, well-bounded search space; optimize the
@@ -531,19 +535,49 @@ def _combine_horizon_metrics(
         candles, joint_signals, cfg, initial_capital=10000,
         fee=fee, slippage=slippage, bar_seconds=bar_seconds,
     )
+    # Out-of-sample candles are never loaded here. Stress the SAME held-out
+    # pre-OOS scoring window with cost uncertainty known in advance.
+    stressed = simulate_rotations(
+        candles, joint_signals, cfg, initial_capital=10000,
+        fee=fee, slippage=min(.05, slippage * STRESS_SLIPPAGE_MULTIPLIER),
+        bar_seconds=bar_seconds, fee_multiplier=STRESS_FEE_MULTIPLIER,
+    )
+    robustness = assess_robustness(simulated, stressed)
     capital = simulated["capital_final"]
     dd = simulated["max_drawdown"]
     worst = simulated["worst_fold_return"]
     sharpe = simulated["sharpe"]
-    score = (
+    base_score = (
         math.log(max(1e-9, capital / 10000))
         + .5 * dd + .28 * min(0.0, worst)
         + .01 * float(np.clip(sharpe, -4, 4))
         - .01 * float(simulated["completed_cycles"] == 0)
     )
+    stressed_score = (
+        math.log(max(1e-9, stressed["capital_final"] / 10000))
+        + .5 * stressed["max_drawdown"]
+        + .28 * min(0.0, stressed["worst_fold_return"])
+        + .01 * float(np.clip(stressed["sharpe"], -4, 4))
+    )
+    # Candidates are ranked by their WORSE risk-adjusted performance.
+    # Hard quality requirements apply separately, before winner selection.
+    score = min(base_score, stressed_score)
     return {
         "score": float(score),
-        "score_method": "joint_compounded_capital_risk_adjusted",
+        "base_score": float(base_score),
+        "stress_score": float(stressed_score),
+        "score_method": "joint_compounded_capital_risk_adjusted_v9_stress_min",
+        "robustness": robustness,
+        "stress_capital_final": stressed["capital_final"],
+        "stress_net_profit_usd": stressed["net_profit_usd"],
+        "stress_fees_paid": stressed["fees_paid"],
+        "stress_slippage_usd_estimate": stressed["slippage_usd_estimate"],
+        "segment_cycle_counts": simulated["segment_cycle_counts"],
+        "segment_returns": simulated["segment_returns"],
+        "average_winning_cycle_usd": simulated["average_winning_cycle_usd"],
+        "average_losing_cycle_usd": simulated["average_losing_cycle_usd"],
+        "average_win_loss_ratio": simulated["average_win_loss_ratio"],
+        "largest_win_share_of_gross_wins": simulated["largest_win_share_of_gross_wins"],
         "capital_final": capital,
         "return_total": simulated["total_return"],
         "max_drawdown": dd,
@@ -669,10 +703,14 @@ def _run_optimization(strategy_id: str) -> None:
                     bar_seconds=TIMEFRAME_SECONDS[original.decision_timeframe],
                 )
                 score = metrics["score"]
-                # Training can complete successfully without producing a
-                # tradable strategy. An idle CASH result must never win.
-                entry = {"trial": index + 1,
-                         "status": "COMPLETED" if metrics.get("completed_cycles", metrics.get("buys", 0)) > 0 else "NO_TRADES",
+                # One profitable cycle is evidence of an isolated event, not
+                # a stable strategy. No OOS run until ALL pre-OOS gates pass.
+                cycles = metrics.get("completed_cycles", metrics.get("buys", 0))
+                eligible = bool(metrics.get("robustness", {}).get("passed"))
+                status = "NO_TRADES" if not cycles else (
+                    "COMPLETED" if eligible else "INSUFFICIENT_EVIDENCE"
+                )
+                entry = {"trial": index + 1, "status": status,
                          "parameters": candidate, "metrics": metrics}
             except Exception as exc:
                 score = -1000.0
@@ -695,7 +733,42 @@ def _run_optimization(strategy_id: str) -> None:
                 return
         if winner is None:
             inactive = [entry for entry in records if entry["status"] == "NO_TRADES"]
+            insufficient = [entry for entry in records if entry["status"] == "INSUFFICIENT_EVIDENCE"]
             unsuccessful = [entry for entry in records if entry["status"] == "FAILED"]
+            if insufficient and not any(item["status"] == "COMPLETED" for item in records):
+                summary = {
+                    "validation_kind": "INTERNAL_PRE_OOS_CHRONOLOGICAL",
+                    "oos_untouched_from": first_oos.isoformat(),
+                    "horizons_hours": list(horizons),
+                    "optimization_target": "NET_COMPOUNDED_BTC_CASH_CAPITAL",
+                    "completed_trials": 0,
+                    "inactive_trials": len(inactive),
+                    "insufficient_evidence_trials": len(insufficient),
+                    "failed_trials": len(unsuccessful),
+                    "insufficient_evidence_trials": len(insufficient),
+                    "quality_gate": "V9_PRE_OOS_ROBUSTNESS_AND_ALPACA_STRESS",
+                    "quality_by_trial": [
+                        {"trial": item["trial"], "status": item["status"],
+                         "robustness": item["metrics"].get("robustness")}
+                        for item in records if item.get("metrics")
+                    ],
+                    "selection_warning": (
+                        "Houve compras na validação, mas nenhum candidato "
+                        "demonstrou consistência suficiente antes do OOS."
+                    ),
+                }
+                _update_strategy(
+                    strategy_id, status="INSUFFICIENT_EVIDENCE", progress=100,
+                    champion_json=None,
+                    summary_json=json.dumps(summary, allow_nan=False),
+                    error_message=(
+                        "A pesquisa encontrou operações, mas nenhum candidato atingiu "
+                        "os critérios de consistência temporal, resultado líquido "
+                        "e resistência a taxas/slippage maiores. "
+                        "Nenhuma execução OOS foi iniciada; consulte os diagnósticos."
+                    ),
+                )
+                return
             if inactive:
                 diagnostics_by_trial = [
                     {
@@ -762,6 +835,17 @@ def _run_optimization(strategy_id: str) -> None:
             "policy_dimensions": len(POLICY_SPACE),
             "optimized_decision_policy": True,
             "capitalization_engine": "btc_policy.simulate_rotations",
+            "quality_gate": "V9_PRE_OOS_ROBUSTNESS_AND_ALPACA_STRESS",
+            "minimum_completed_cycles": MIN_COMPLETED_CYCLES,
+            "minimum_active_segments": MIN_ACTIVE_SEGMENTS,
+            "minimum_profitable_segments": MIN_PROFITABLE_SEGMENTS,
+            "fee_stress_multiplier": STRESS_FEE_MULTIPLIER,
+            "slippage_stress_multiplier": STRESS_SLIPPAGE_MULTIPLIER,
+            "quality_by_trial": [
+                {"trial": item["trial"], "status": item["status"],
+                 "robustness": item["metrics"].get("robustness")}
+                for item in records if item.get("metrics")
+            ],
             "objective_note": "Stops confirmed at close; filled at next open; final OOS untouched",
             "model_family": "LightGBM",
             "optimization_algorithm": ("CRYPTO_CARO_GP_CONSTRAINED_EI" if mode == "BAYESIAN" else "LATIN_HYPERCUBE"),
@@ -775,6 +859,9 @@ def _run_optimization(strategy_id: str) -> None:
             "initial_capital_for_selection": 10000,
             "completed_trials": sum(item["status"] == "COMPLETED" for item in records),
             "inactive_trials": sum(item["status"] == "NO_TRADES" for item in records),
+            "insufficient_evidence_trials": sum(
+                item["status"] == "INSUFFICIENT_EVIDENCE" for item in records
+            ),
             "failed_trials": sum(item["status"] == "FAILED" for item in records),
             "historical_source_job_id": row.source_job_id,
             "selection_warning": "Resultados de seleção interna, não são o teste final OOS.",
