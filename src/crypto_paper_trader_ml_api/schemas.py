@@ -60,6 +60,7 @@ class MLBacktestJobResponse(BaseModel):
     trend_timeframe: str
     period_years: int
     initial_capital: float
+    replay_parent_job_id: str | None = None
     error_message: str | None
     created_at: datetime
     started_at: datetime | None

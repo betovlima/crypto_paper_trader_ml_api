@@ -27,6 +27,9 @@ class MLBacktestJob(Base):
     period_years: Mapped[int] = mapped_column(Integer)
     initial_capital: Mapped[float] = mapped_column(Float)
     request_json: Mapped[str] = mapped_column(Text)
+    replay_parent_job_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, index=True
+    )
     settings_snapshot_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -98,6 +101,14 @@ def _add_missing_job_columns() -> None:
     if "settings_snapshot_json" not in columns:
         with engine.begin() as connection:
             connection.execute(text("ALTER TABLE ml_backtest_jobs ADD COLUMN settings_snapshot_json TEXT"))
+    if "replay_parent_job_id" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE ml_backtest_jobs ADD COLUMN replay_parent_job_id VARCHAR(36)"))
+    with engine.begin() as connection:
+        connection.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_ml_backtest_jobs_replay_parent_job_id "
+            "ON ml_backtest_jobs (replay_parent_job_id)"
+        ))
 
 
 def initialize_database() -> None:
