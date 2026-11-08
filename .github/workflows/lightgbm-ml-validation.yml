@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/lightgbm-ml-replacement-v3-20261108
+      - feature/crypto-research-workspace-v4-20261108
   workflow_dispatch:
 
 jobs:
