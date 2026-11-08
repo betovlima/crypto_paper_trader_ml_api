@@ -179,3 +179,118 @@ def test_old_target_stop_mode_remains_default_and_invalid_direct_symbols_are_rej
             symbol="BTCUSDT", experiment_type="BTC_DIRECTION_RETURN",
             decision_timeframe="4hour",
         ), params)
+
+
+def test_full_direction_job_routes_to_research_engine_and_writes_audit(monkeypatch):
+    from crypto_paper_trader_ml_api import direct_forecast
+
+    raw = synthetic_candles(180)
+
+    class FakeMarket:
+        archive_manifest = {"30min": [{"sha256": "test-verified"}]}
+        market_interruptions = {}
+
+        def __init__(self, *_args):
+            pass
+
+        def fetch_history(self, *, symbol, timeframe, period_years, progress, cancelled):
+            assert symbol == "BTCUSDT"
+            assert timeframe == "30min"
+            return raw.copy()
+
+        def close(self):
+            pass
+
+    def fake_predict(featured, parameters, *, timeframe, horizon_hours, cancelled, progress=None):
+        frame = create_direction_labels(featured, timeframe, horizon_hours)
+        frame = frame.dropna(subset=["forecast_realized_return"]).head(30).copy()
+        frame["forecast_p_up"] = 0.51
+        frame["forecast_predicted_return"] = 0.001
+        frame["forecast_baseline_p_up"] = 0.5
+        frame["forecast_baseline_mean_return"] = 0.0
+        frame["forecast_fold"] = 1
+        return frame, {
+            "horizon_candles": horizon_hours * 2,
+            "fold_windows": [{"fold": 1, "horizon_hours": horizon_hours}],
+            "feature_importance": {"direction": [], "return": []},
+        }
+
+    monkeypatch.setattr(direct_forecast, "MEXCHistoryClient", FakeMarket)
+    monkeypatch.setattr(direct_forecast, "build_features", lambda decision, parameters, trend, **kwargs: decision.assign(market_segment=0))
+    monkeypatch.setattr(direct_forecast, "walk_forward_direction", fake_predict)
+    params = default_parameters(**{"forecast.horizons_hours": [2, 6, 24]})
+    request = _resolve_request(MLBacktestCreate(
+        experiment_type="BTC_DIRECTION_RETURN", symbol="BTCUSDT",
+        decision_timeframe="30min", trend_timeframe="30min",
+    ), params)
+    archives = []
+    result = direct_forecast.run_direction_backtest(
+        request, params, lambda _value, _stage: None,
+        lambda: False, audit_writer=archives.append,
+    )
+    assert result["experiment_type"] == "BTC_DIRECTION_RETURN"
+    assert result["summary"]["financial_trading_enabled"] is False
+    assert result["trades"] == []
+    assert result["equity_curve"] == []
+    assert result["rotation_timeline"] == []
+    assert [item["horizon_hours"] for item in result["forecast"]["horizons"]] == [2, 6, 24]
+    assert len(archives) == 1
+    with ZipFile(BytesIO(archives[0])) as audit:
+        manifest = json.loads(audit.read("manifest.json"))
+        assert manifest["research_only"] is True
+        assert [item["predictions"] for item in manifest["horizons"]] == [30, 30, 30]
+        all_rows = pd.read_csv(BytesIO(audit.read("forecast_predictions_oos.csv")))
+        assert len(all_rows) == 90
+        assert sorted(all_rows["forecast_horizon_hours"].unique().tolist()) == [2, 6, 24]
+
+
+def test_service_dispatches_direct_jobs_without_touching_target_stop_engine(monkeypatch):
+    from crypto_paper_trader_ml_api import service
+    from crypto_paper_trader_ml_api.database import MLBacktestAudit, MLBacktestJob, SessionLocal
+    from datetime import datetime, timezone
+    from uuid import uuid4
+
+    job_id = str(uuid4())
+    params = default_parameters()
+    request = _resolve_request(MLBacktestCreate(
+        experiment_type="BTC_DIRECTION_RETURN", symbol="BTCUSDT",
+    ), params)
+    with SessionLocal.begin() as session:
+        session.add(MLBacktestJob(
+            id=job_id, status="QUEUED", stage="Queued", progress=0,
+            symbol="BTCUSDT", decision_timeframe=request.decision_timeframe,
+            trend_timeframe=request.trend_timeframe, period_years=request.period_years,
+            initial_capital=request.initial_capital, request_json=request.model_dump_json(),
+            settings_snapshot_json=json.dumps(params.snapshot()), result_json=None,
+            error_message=None, created_at=datetime.now(timezone.utc),
+        ))
+
+    calls = []
+    def fake_direct(req, parameters, progress, cancelled, audit_writer=None):
+        calls.append(req.experiment_type)
+        audit_writer(b"direction-only-zip")
+        return {"experiment_type": "BTC_DIRECTION_RETURN", "forecast": {"horizons": []}}
+
+    def blocked_legacy(*args, **kwargs):
+        raise AssertionError("Legacy BTC/CASH engine must not run for direct forecasts")
+
+    monkeypatch.setattr(service, "run_direction_backtest", fake_direct)
+    monkeypatch.setattr(service, "run_ml_backtest", blocked_legacy)
+    try:
+        service._run_job(job_id)
+        with SessionLocal() as session:
+            job = session.get(MLBacktestJob, job_id)
+            audit = session.get(MLBacktestAudit, job_id)
+            assert job.status == "COMPLETED"
+            assert audit.archive_zip == b"direction-only-zip"
+            assert json.loads(job.result_json)["experiment_type"] == "BTC_DIRECTION_RETURN"
+            assert calls == ["BTC_DIRECTION_RETURN"]
+    finally:
+        with SessionLocal.begin() as session:
+            audit = session.get(MLBacktestAudit, job_id)
+            if audit is not None:
+                session.delete(audit)
+                session.flush()
+            job = session.get(MLBacktestJob, job_id)
+            if job is not None:
+                session.delete(job)
