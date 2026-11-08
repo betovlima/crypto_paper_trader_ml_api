@@ -11,6 +11,7 @@ from sqlalchemy import desc
 
 from .archive_replay import ArchivedMarketClient, compare_archives, inspect_source_archive
 from .capitalization import compare_capitalization
+from .btc_policy import validate_policy
 from .database import MLBacktestAudit, MLBacktestJob, MLResearchStrategy, SessionLocal
 from .engine import run_ml_backtest
 from .mexc import TIMEFRAME_SECONDS
@@ -265,14 +266,16 @@ def create_strategy_job(source_job_id: str, overrides: dict[str, float | int]) -
             raise ValueError("Auditoria BTC original não está disponível")
         request, original_snapshot = inspect_source_archive(audit.archive_zip)
     if not overrides or any(
-        not (key.startswith("lightgbm.") or key.startswith("forecast.regression_"))
+        not (key.startswith("lightgbm.") or key.startswith("forecast.regression_") or key.startswith("policy."))
         for key in overrides
     ):
-        raise ValueError("A otimização pode alterar somente hiperparâmetros LightGBM")
+        raise ValueError("A otimização pode alterar somente parâmetros LightGBM e da política BTC/CASH")
     snapshot = get_runtime_parameters_from_snapshot(original_snapshot).snapshot()
     for key, value in current.snapshot().items():
         if key.startswith("lightgbm.") or key.startswith("forecast.regression_"):
             snapshot[key] = value
+    if any(key.startswith("policy.") for key in overrides):
+        validate_policy(overrides)
     snapshot.update(overrides)
     # Use existing DB-driven limits for the entire candidate snapshot.
     from .settings_service import _validate_cross_parameter_values
@@ -335,9 +338,16 @@ def capitalize_replay_job(job_id: str, parameters: dict) -> dict:
         candidate = session.get(MLBacktestAudit, replay.id)
         if source is None or candidate is None:
             raise ValueError("Auditorias originais V1/V2 indisponíveis no banco")
+        snapshot = json.loads(replay.settings_snapshot_json or "{}")
+        optimized_policy = {
+            k: v for k, v in snapshot.items() if k.startswith("policy.")
+        }
         result = compare_capitalization(
-            source.archive_zip, candidate.archive_zip, **parameters
+            source.archive_zip, candidate.archive_zip,
+            optimized_policy=optimized_policy if optimized_policy.get("policy.enabled") else None,
+            **parameters
         )
+        result["optimized_policy_applied"] = bool(optimized_policy.get("policy.enabled"))
         result["source_job_id"] = original.id
         result["replay_job_id"] = replay.id
         return result
