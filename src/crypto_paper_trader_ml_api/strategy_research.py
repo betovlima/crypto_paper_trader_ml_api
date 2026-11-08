@@ -102,6 +102,16 @@ def create_strategy(*, name: str, source_job_id: str, horizon_hours: int = 0) ->
                 f"A auditoria selecionada não contém os horizontes {sorted(missing)}h; "
                 "escolha uma execução com previsões de 2h, 6h e 24h."
             )
+        with ZipFile(BytesIO(audit.archive_zip)) as archive:
+            fold_horizons = {
+                int(fold["horizon_hours"]) for fold in json.loads(archive.read("folds.json"))
+            }
+        missing_folds = set(selected) - fold_horizons
+        if missing_folds:
+            raise ValueError(
+                f"A auditoria não contém folds OOS de {sorted(missing_folds)}h. "
+                "Selecione outra execução com os três horizontes concluídos."
+            )
         row = MLResearchStrategy(
             id=str(uuid4()), name=name.strip(), source_job_id=source_job_id,
             horizon_hours=horizon_hours, status="DRAFT", progress=0, trials_json="[]",
