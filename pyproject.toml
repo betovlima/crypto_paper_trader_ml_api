@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "crypto-paper-trader-ml-api"
 version = "0.2.2"
-description = "Independent XGBoost walk-forward backtest API for Crypto Paper Trader."
+description = "Independent LightGBM walk-forward backtest API for Crypto Paper Trader."
 authors = ["Roberto"]
 readme = "README.md"
 packages = [{ include = "crypto_paper_trader_ml_api", from = "src" }]
@@ -18,7 +18,7 @@ sqlalchemy = ">=2.0,<3.0"
 pandas = ">=2.2,<4.0"
 numpy = ">=2.0,<3.0"
 scikit-learn = ">=1.6,<2.0"
-xgboost = ">=2.1,<4.0"
+lightgbm = ">=4.6,<5.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.3,<9.0"
