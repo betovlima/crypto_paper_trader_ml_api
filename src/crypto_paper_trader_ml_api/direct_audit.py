@@ -69,6 +69,7 @@ def build_direction_audit_archive(
     manifest = {
         "schema_version": 1,
         "kind": "BTC_DIRECTION_RETURN_OOS_AUDIT",
+        "model_family": result["execution"].get("model_family", "UNKNOWN"),
         "experiment_type": request.experiment_type,
         "research_only": True,
         "financial_trading_enabled": False,
