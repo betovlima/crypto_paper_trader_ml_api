@@ -315,3 +315,57 @@ def test_only_the_exact_official_binance_spot_halt_is_allowed():
             pd.Timestamp("2026-06-14T13:30:00Z"),
         ]), unexpected=no_unexpected,
     ) == []
+
+
+def test_full_archive_accepts_verified_halt_without_fabricating_missing_candles():
+    now = datetime(2024, 3, 24, 12, tzinfo=timezone.utc)
+    suspended = {
+        pd.Timestamp("2023-03-24T13:00:00Z"),
+        pd.Timestamp("2023-03-24T13:30:00Z"),
+    }
+
+    def handle(request):
+        path = request.url.path
+        original = path.removesuffix(".CHECKSUM")
+        name = PurePosixPath(original).name.removesuffix(".zip")
+        parts = name.split("-")
+        if "/daily/" in original:
+            y, m, d = map(int, parts[-3:])
+            dates = [datetime(y, m, d, tzinfo=timezone.utc)]
+        else:
+            y, m = map(int, parts[-2:])
+            dates = [
+                datetime(y, m, day, tzinfo=timezone.utc)
+                for day in range(1, calendar.monthrange(y, m)[1] + 1)
+            ]
+        rows = []
+        for date in dates:
+            for slot in range(48):
+                opening = pd.Timestamp(date + timedelta(minutes=30 * slot))
+                if opening in suspended:
+                    continue
+                opened_ms = int(opening.timestamp() * 1000)
+                rows.append([
+                    opened_ms, "100", "101", "99", "100", "10",
+                    opened_ms + 1_799_999, "1000", "5", "5", "500", "0",
+                ])
+        blob = _make_archive(name + ".csv", rows)
+        if path.endswith(".CHECKSUM"):
+            return httpx.Response(200, text=sha256(blob).hexdigest() + "  " + name + ".zip")
+        return httpx.Response(200, content=blob)
+
+    client = BinancePublicArchiveClient(
+        _params(), "test", now=now,
+        client=httpx.Client(transport=httpx.MockTransport(handle), base_url=BASE_URL),
+    )
+    try:
+        frame = client.fetch_history(
+            symbol="BTCUSDT", timeframe="30min", period_years=1,
+        )
+    finally:
+        client.close()
+    assert len(frame) == 17_532 - 2
+    assert frame["timestamp"].is_unique
+    assert not suspended.intersection(set(frame["timestamp"]))
+    assert frame["timestamp"].diff().dropna().max() == pd.Timedelta(minutes=90)
+    assert client.market_interruptions["30min"][0]["missing_candles"] == 2
