@@ -250,6 +250,49 @@ def create_replay_job(source_job_id: str) -> dict:
     return _serialize_job(job)
 
 
+def create_strategy_job(source_job_id: str, overrides: dict[str, float | int]) -> dict:
+    """Run the optimized LightGBM candidate on untouched chronological OOS data.
+
+    Training candles are replayed from the stored source ZIP. The selected
+    candidate overrides the model snapshot only, never future outcomes,
+    market-history files or chronological fold boundaries.
+    """
+    current = get_runtime_parameters()
+    with SessionLocal() as session:
+        source = session.get(MLBacktestJob, source_job_id)
+        audit = session.get(MLBacktestAudit, source_job_id)
+        if source is None or source.status != "COMPLETED" or audit is None:
+            raise ValueError("Auditoria BTC original não está disponível")
+        request, original_snapshot = inspect_source_archive(audit.archive_zip)
+    if not overrides or any(
+        not (key.startswith("lightgbm.") or key.startswith("forecast.regression_"))
+        for key in overrides
+    ):
+        raise ValueError("A otimização pode alterar somente hiperparâmetros LightGBM")
+    snapshot = get_runtime_parameters_from_snapshot(original_snapshot).snapshot()
+    for key, value in current.snapshot().items():
+        if key.startswith("lightgbm.") or key.startswith("forecast.regression_"):
+            snapshot[key] = value
+    snapshot.update(overrides)
+    # Use existing DB-driven limits for the entire candidate snapshot.
+    from .settings_service import _validate_cross_parameter_values
+    _validate_cross_parameter_values(snapshot)
+    job = MLBacktestJob(
+        id=str(uuid4()), status="QUEUED", stage="Queued", progress=0,
+        replay_parent_job_id=source_job_id, symbol=request.symbol,
+        decision_timeframe=request.decision_timeframe,
+        trend_timeframe=request.trend_timeframe, period_years=request.period_years,
+        initial_capital=request.initial_capital, request_json=request.model_dump_json(),
+        settings_snapshot_json=json.dumps(snapshot, separators=(",", ":")),
+        created_at=datetime.now(timezone.utc),
+    )
+    with SessionLocal.begin() as session:
+        session.add(job)
+    with _submit_lock:
+        _get_executor(current).submit(_run_job, job.id)
+    return _serialize_job(job)
+
+
 def list_jobs(limit: int) -> list[dict]:
     with SessionLocal() as session:
         jobs = session.query(MLBacktestJob).order_by(desc(MLBacktestJob.created_at)).limit(limit).all()
