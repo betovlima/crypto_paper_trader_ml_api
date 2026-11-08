@@ -38,8 +38,10 @@ def build_audit_archive(
     parameters: RuntimeParameters,
     result: dict,
     model_metadata: dict,
+    decision_history: pd.DataFrame | None = None,
+    trend_history: pd.DataFrame | None = None,
 ) -> bytes:
-    """Export all OOS candles, probabilities, positions, simulated orders and costs.
+    """Export OOS evidence and, when available, raw model-training histories.
 
     Unlike the UI response, these files are intentionally NOT sampled or truncated.
     """
@@ -88,7 +90,7 @@ def build_audit_archive(
             })
 
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "CRYPTO_PAPER_TRADER_ML_AUDIT",
         "scope": "OUT_OF_SAMPLE",
         "symbol": request.symbol,
@@ -103,6 +105,10 @@ def build_audit_archive(
         "price_peak_semantics": "Highest observed BTC closing price up to each candle, not an ex-post local peak",
         "execution_time_semantics": "Candle timestamp identifies the bar; exact intrabar execution time is unavailable",
         "unsampled": True,
+        "raw_history_included": decision_history is not None,
+        "history_coverage": model_metadata.get("history_coverage"),
+        "fold_windows": model_metadata.get("fold_windows", []),
+        "purge_candles": model_metadata.get("label_horizon_candles"),
     }
     predicted_csv = predictions.copy()
     if "timestamp" in predicted_csv.columns:
@@ -121,6 +127,19 @@ def build_audit_archive(
             if name not in {"equity_curve", "rotation_timeline", "trades"}
         }))
         archive.writestr("predictions_oos.csv", predicted_csv.to_csv(index=False).encode("utf-8-sig"))
+        if decision_history is not None:
+            archive.writestr(
+                "market_history_decision.csv",
+                decision_history.to_csv(index=False).encode("utf-8-sig"),
+            )
+        if trend_history is not None:
+            archive.writestr(
+                "market_history_trend.csv",
+                trend_history.to_csv(index=False).encode("utf-8-sig"),
+            )
+        archive.writestr("folds.json", _json_bytes(model_metadata.get("fold_windows", [])))
+        archive.writestr("history_coverage.json", _json_bytes(model_metadata.get("history_coverage")))
+
         archive.writestr("positions_full.csv", _csv_bytes(position_rows, [
             "timestamp_utc", "btc_close", "peak_close_so_far",
             "distance_to_price_peak", "position_at_candle_close", "equity",
@@ -152,5 +171,9 @@ def build_audit_archive(
             "As distâncias ao topo são análises retrospectivas; não justificam operações na abertura.\n"
             "O timestamp de stops intrabar identifica o candle, não a hora exata do evento.\n"
             "As probabilidades OOS foram geradas durante a execução original, não reestimadas.\n"
+            "folds.json: fronteiras de treino, calibração e teste e intervalos de segurança.\n"
+            "history_coverage.json: cobertura real dos dados, lacunas e limite da coleta.\n"
+            "market_history_decision.csv e market_history_trend.csv: candles brutos utilizados (quando disponíveis).\n"
+
         ).encode("utf-8"))
     return buffer.getvalue()
