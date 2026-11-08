@@ -56,6 +56,36 @@ class MLBacktestAudit(Base):
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
+ 
+class MLResearchStrategy(Base):
+    """Persisted LightGBM strategy and its optimization campaign."""
+    __tablename__ = "ml_research_strategies"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    source_job_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("ml_backtest_jobs.id"), nullable=False, index=True
+    )
+    horizon_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="DRAFT")
+    mode: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    trials_target: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    trials_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    champion_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    execution_job_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("ml_backtest_jobs.id"), nullable=True
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+
 
 class MLRuntimeParameter(Base):
     __tablename__ = "ml_runtime_parameters"
