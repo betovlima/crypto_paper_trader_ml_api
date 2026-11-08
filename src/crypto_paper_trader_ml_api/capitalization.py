@@ -14,6 +14,7 @@ from zipfile import ZipFile
 from .archive_replay import compare_archives
 from .mexc import TIMEFRAME_SECONDS
 from .btc_policy import aggregate_signals, simulate_rotations, validate_policy
+from .alpaca_fees import ALPACA_FEE_MODEL, ALPACA_FEE_SOURCE, ALPACA_TIERS, AlpacaFeeLedger, round_trip_cost
 
 
 def _utc(value: str) -> datetime:
@@ -140,36 +141,72 @@ def _summary_series(
     capital: float, fee: float, slippage: float, edge: float,
     min_probability: float, exit_return: float, baseline: bool, label: str,
     bar_seconds: int,
+    fee_model: str = "FIXED",
+    alpaca_liquidity: str = "TAKER",
+    alpaca_initial_30d_volume_usd: float = 0.0,
 ) -> dict:
+    ledger = (
+        AlpacaFeeLedger(alpaca_liquidity, alpaca_initial_30d_volume_usd)
+        if fee_model == ALPACA_FEE_MODEL else None
+    )
+    if fee_model not in {"FIXED", ALPACA_FEE_MODEL}:
+        raise ValueError("Modelo de taxas inválido")
     cash, quantity = capital, 0.0
+    fees_paid, slippage_paid = 0.0, 0.0
     actions, points = [], []
     switches, sells, exposed = 0, 0, 0
     peak, max_drawdown = capital, 0.0
     # Required gross price appreciation to cover the entire buy/sell round trip.
-    round_trip = (1 + slippage) / ((1 - fee) ** 2 * (1 - slippage)) - 1
+    base_fee = ledger.quote(candles[start]["timestamp"])["rate"] if ledger else fee
+    round_trip = round_trip_cost(base_fee, base_fee, slippage)
 
     def trade(side: str, price: float, at: datetime, signal: dict | None, reason: str):
-        nonlocal cash, quantity, switches, sells
+        nonlocal cash, quantity, switches, sells, fees_paid, slippage_paid
+        quoted = ledger.quote(at) if ledger else {
+            "rate": fee, "tier": None, "liquidity": "FIXED",
+            "volume_30d_usd": None, "tier_cutoff_at": None,
+        }
+        actual_fee = quoted["rate"]
         if side == "BUY":
             if cash <= 0:
                 return
             paid = price * (1 + slippage)
-            quantity = cash * (1 - fee) / paid
+            notional = cash
+            charge = cash * actual_fee
+            quantity = cash * (1 - actual_fee) / paid
+            slippage_cost = cash * slippage / (1 + slippage)
+            fee_asset, fee_amount = "BTC", cash * actual_fee / paid
             cash = 0.0
         else:
             if quantity <= 0:
                 return
-            cash = quantity * price * (1 - slippage) * (1 - fee)
+            notional = quantity * price * (1 - slippage)
+            charge = notional * actual_fee
+            cash = notional - charge
+            slippage_cost = quantity * price * slippage
+            fee_asset, fee_amount = "USD", charge
             quantity = 0.0
             sells += 1
+        fees_paid += charge
+        slippage_paid += slippage_cost
         switches += 1
         actions.append({
             "timestamp": at.isoformat(), "action": side, "price": price,
+            "fee_model": fee_model, "fee_rate": actual_fee, "fee_tier": quoted["tier"],
+            "liquidity": quoted["liquidity"],
+            "fee_30d_volume_usd": quoted["volume_30d_usd"],
+            "fee_tier_cutoff_at": quoted["tier_cutoff_at"],
+            "fee_usd_equivalent": charge, "fee_asset": fee_asset,
+            "fee_asset_amount": fee_amount,
+            "slippage_usd_estimate": slippage_cost,
+            "executed_notional_usd": notional,
             "reason": reason, "signal_at": signal["signal_at"] if signal else None,
             "predicted_return": signal["predicted_return"] if signal else None,
             "probability_up": signal["p_up"] if signal else None,
             "capital_after": cash + quantity * price,
         })
+        if ledger:
+            ledger.record(at, notional)
 
     for index in range(start, end + 1):
         candle = candles[index]
@@ -177,8 +214,10 @@ def _summary_series(
         if baseline and index == start:
             trade("BUY", candle["open"], candle["timestamp"], None, "BUY_AND_HOLD")
         elif not baseline and signal:
+            fee_now = ledger.quote(candle["timestamp"])["rate"] if ledger else fee
+            current_round_trip = round_trip_cost(fee_now, fee_now, slippage)
             if quantity == 0 and (
-                signal["predicted_return"] > round_trip + edge
+                signal["predicted_return"] > current_round_trip + edge
                 and signal["p_up"] >= min_probability
                 and signal.get("positive_votes", 3) >= 2
             ):
@@ -228,6 +267,13 @@ def _summary_series(
         "exposure": exposed / len(points),
         "switch_count": switches,
         "completed_cycles": sells,
+        "fees_paid": fees_paid,
+        "alpaca_fees_usd": fees_paid if ledger else None,
+        "slippage_usd_estimate": slippage_paid,
+        "net_profit_usd": cash - capital,
+        "fee_model": fee_model,
+        "alpaca_liquidity": alpaca_liquidity if ledger else None,
+        "fee_tier_history": sorted({(a["fee_tier"], a["fee_rate"]) for a in actions if a["fee_tier"] is not None}),
         "required_round_trip_return": round_trip,
         "timeline": sampled,
         "actions": actions[-150:],
@@ -284,10 +330,14 @@ def compare_capitalization(
     start, end = min(source), max(source)
     if start == end:
         raise ValueError("Período OOS insuficiente para calcular capitalização")
+    price_policy = validate_policy(optimized_policy) if optimized_policy is not None else None
     common = dict(start=start, end=end, capital=initial_capital, fee=fee_rate,
                   bar_seconds=seconds,
                   slippage=slippage_rate, edge=entry_edge,
-                  min_probability=min_probability, exit_return=exit_return)
+                  min_probability=min_probability, exit_return=exit_return,
+                  fee_model=price_policy["policy.fee_model"] if price_policy else "FIXED",
+                  alpaca_liquidity=price_policy["policy.alpaca_liquidity"] if price_policy else "TAKER",
+                  alpaca_initial_30d_volume_usd=price_policy["policy.alpaca_initial_30d_volume_usd"] if price_policy else 0.0)
     if optimized_policy is not None:
         # Same causal engine used for model/policy selection before OOS.
         # Both fee and slippage come from the same user's replay settings.
@@ -325,13 +375,28 @@ def compare_capitalization(
         "period_start": candles[start]["timestamp"].isoformat(),
         "period_end": candles[end]["timestamp"].isoformat(),
         "signal_count": len(source),
-        "optimized_policy": validate_policy(optimized_policy) if optimized_policy else None,
+        "optimized_policy": price_policy,
+        "fee_model": common["fee_model"],
+        "fee_liquidity": common["alpaca_liquidity"] if price_policy else None,
+        "alpaca_fee_schedule": [
+            {"min_30d_volume_usd": minimum, "maker": maker, "taker": taker}
+            for minimum, maker, taker in ALPACA_TIERS
+        ] if common["fee_model"] == ALPACA_FEE_MODEL else None,
+        "alpaca_fee_source": ALPACA_FEE_SOURCE if common["fee_model"] == ALPACA_FEE_MODEL else None,
+        "fee_note": (
+            "Alpaca crypto spot volume 30d, daily 03:00 New York. Taker by default; buys charged in BTC, sells in USD. "
+            "Only strategy volume known. Slippage estimated separately. "
+            "Source BTCUSDT is a USD-equivalent approximation of future Alpaca BTCUSD trading."
+            if common["fee_model"] == ALPACA_FEE_MODEL
+            else "Legacy fixed fee for historical compatibility."
+        ),
         "portfolio_rule": "Single BTC/CASH portfolio with reinvestment, model exit, stop, trailing, take profit and cooldown" if optimized_policy else None,
 
         "original_archive_sha256": sha256(original).hexdigest(),
         "replay_archive_sha256": sha256(replay).hexdigest(),
         "parameters": {
             "initial_capital": initial_capital, "fee_rate": fee_rate,
+            "effective_fee_model": common["fee_model"],
             "slippage_rate": slippage_rate, "entry_edge": entry_edge,
             "min_probability": min_probability, "exit_return": exit_return,
         },
