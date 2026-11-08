@@ -461,7 +461,21 @@ def export_strategy_report(strategy_id: str) -> bytes:
                 json.dumps(item["parameters"], sort_keys=True), item.get("error"),
             ])
         z.writestr("optimization_trials.csv", csv_buffer.getvalue())
+        z.writestr("README.txt", (
+            "BTC/CASH LightGBM research audit\n"
+            "strategy.json: strategy and optimization metadata\n"
+            "optimization_trials.csv: all attempted hyperparameter candidates\n"
+            "source_historical_audit.zip: immutable source data and labels\n"
+            "final_execution_result.json: final OOS metrics when completed\n"
+            "final_execution_parameters.json: LightGBM champion snapshot\n"
+            "final_oos_audit.zip: all OOS predictions and OHLCV of the executed candidate\n"
+            "Internal pre-OOS tuning is not proof of live profitability.\n"
+        ))
         with SessionLocal() as session:
+            source = session.get(MLBacktestAudit, strategy["source_job_id"])
+            if source is not None:
+                z.writestr("source_historical_audit.zip", source.archive_zip)
+
             job = session.get(MLBacktestJob, strategy["execution_job_id"]) if strategy["execution_job_id"] else None
             audit = session.get(MLBacktestAudit, job.id) if job and job.status == "COMPLETED" else None
             if job and job.result_json:
