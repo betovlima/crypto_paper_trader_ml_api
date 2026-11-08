@@ -1,136 +1,83 @@
-# BTC Direction & Return V2: corrigir e diagnosticar a regressão
+# BTC Direction & Return V2 | Operação integral pelo Front
 
-## Por que esta versão existe
+## Objetivo comercial
 
-A primeira auditoria com quatro anos de Binance Spot identificou regressões
-de duas horas inteiramente constantes em três folds. Os classificadores de
-duas horas mostraram ROC-AUC pouco acima de 0,5, mas a vantagem contra a
-frequência de altas do treino foi pequena.
+O produto final deverá capitalizar USDT com apenas duas transições:
+**CASH → BTC** (compra) e **BTC → CASH** (venda), com taxas, slippage,
+controle de risco e reinvestimento do capital efetivo.
 
-Esta versão **não** procura automaticamente rentabilidade. Ela investiga
-se os modelos aprendem uma relação preditiva, mantendo o modo Target/Stop
-e a execução V1 como referência. Não integra com ordens Live.
+A V2 atual investiga a qualidade preditiva e a regressão. **Ainda não
+executa operações financeiras BTC/CASH com estes novos modelos.**
+Lucro por ciclo, patrimônio e operações paper pertencem à integração
+posterior do simulador financeiro.
 
-## Regressão em pontos-base e parâmetros independentes
+## Teste 1: comparação controlada V1 × V2 inteiramente pelo Front
 
-Retorno simples real:
+1. Abra a aba **BTC Forecast**.
+2. Selecione uma execução original **BTC Direction & Return**, concluída,
+   com quatro anos da Binance e auditoria armazenada na mesma ML API.
+3. Clique em **Reexecutar e comparar V1 × V2**.
+4. Acompanhe a nova execução e seu progresso na própria tela.
+5. Abra o resultado concluído, que passa a apresentar a seção
+   **Comparação V1 × V2** com ROC-AUC, Brier Skill, MAE, RMSE e
+   previsões distintas por fold.
 
-`r(t,h) = close(t+h) / close(t) - 1`
+A API lê o ZIP original diretamente de ml_backtest_audits no banco,
+reutiliza os candles arquivados e aplica os novos parâmetros de regressão
+configurados no painel. Não baixa preços nem usa arquivos locais.
+O resultado é persistido como uma nova execução, com referência
+replay_parent_job_id à execução original e replay_comparison no resultado.
 
-Alvo do regressor:
+A comparação exige igualdade dos históricos brutos, dos rótulos futuros
+e das fronteiras de treino, validação, calibração e teste. Caso contrário,
+a execução apresenta um erro na tela, sem inventar comparabilidade.
 
-`y_scaled = 10000 * r(t,h)`
+Se o ZIP não estiver persistido na ML API conectada, selecione outra
+execução concluída com auditoria armazenada. O sistema não procura
+automaticamente arquivos no computador.
 
-Predição para auditoria:
+**Não é necessário executar scripts, informar caminhos, abrir terminal
+nem exportar o ZIP para iniciar o replay.** O botão de exportação continua
+disponível apenas para auditoria posterior.
 
-`predicted_return = predicted_scaled / 10000`
+## Teste 2: nova execução completa pelo Front
 
-Assim, 0,5% de retorno corresponde a 50 pontos-base no treinamento,
-mas volta a 0,005 nos resultados. Os valores de 1, 100 e 10000 podem ser
-avaliados controladamente usando `forecast.regression_target_scale`.
+Em **ML Backtest → Nova execução**, escolha:
+- Tipo: **BTC Direction & Return**
+- Fonte: **Binance Spot Archive**
+- Ativo: BTCUSDT
+- Período solicitado: quatro anos
+- Decisão: 30 minutos
+- Tendência: quatro horas
 
-Os campos novos ficam na tabela `ml_runtime_parameters` e na tela
-**Parâmetros**, sem `.env` e sem substituir opções já personalizadas.
+Na aba Parâmetros, os valores padrão V2 são escala 10.000,
+gamma do regressor 0, penalidade L1 0, 350 árvores máximas
+e 3 folds. Todos são mantidos no banco, com snapshot imutável
+por execução, sem configurações de trading em variáveis .env.
 
-| Chave de parâmetro | Padrão | Significado |
-| --- | ---: | --- |
-| forecast.regression_target_scale | 10000 | Fator aplicado ao alvo no ajuste |
-| forecast.regression_n_estimators | 350 | Máximo de árvores |
-| forecast.regression_max_depth | 4 | Profundidade das árvores |
-| forecast.regression_learning_rate | 0,04 | Taxa de aprendizado |
-| forecast.regression_min_child_weight | 4 | Mínimo de Hessian acumulado para divisão |
-| forecast.regression_gamma | 0 | Penalidade mínima de ganho para divisão |
-| forecast.regression_reg_alpha | 0 | Penalidade L1 |
-| forecast.regression_reg_lambda | 1,5 | Penalidade L2 |
-| forecast.regression_early_stopping_rounds | 30 | Paciência de parada |
-| forecast.bootstrap_samples | 200 | Reamostragens por blocos temporais |
+Nesta segunda execução, a janela de preços poderá estar mais recente.
+**Não interprete diferenças da nova coleta como melhora da V2.**
+Para comparar de forma controlada, use o Teste 1.
 
-O classificador continua utilizando os parâmetros `xgboost.*`.
-O regressor ainda compartilha configurações de infraestrutura,
-aleatoriedade e amostragem `xgboost.tree_method`,
-`xgboost.random_state`, `xgboost.n_jobs`,
-`xgboost.subsample` e `xgboost.colsample_bytree`.
-Os parâmetros que controlam divisão, escala, regularização e parada
-do regressor foram separados.
+## O que observar na interface
 
-## Novos diagnósticos
+- O regressor de 2h deixou de prever um único retorno em cada fold?
+- Quantas divisões reais ocorreram nas árvores?
+- O retorno previsto variou mais sem piorar MAE/RMSE?
+- A calibração melhorou o Brier em relação às probabilidades brutas?
+- As métricas de classificação são consistentes nos três folds?
+- Qual é a incerteza estimada por blocos temporais?
 
-Cada fold registra dentro de `folds.json` e de
-`forecast_metrics.json`:
+O número de valores distintos por fold é diagnóstico de modelagem, não
+um sinal suficiente de lucro.
 
-- Classificação: probabilidade bruta OOS e calibrada OOS, Brier antes
-  e depois, referência do treino, coeficiente/intercepto da calibração
-  e tabela de calibração em 10 faixas.
-- XGBoost: número total de árvores, `best_iteration`,
-  árvores efetivamente utilizadas na previsão, nós de divisão,
-  folhas e árvores que nunca dividiram.
-- Regressão: número de retornos distintos e desvio-padrão das
-  previsões, com unidade final em retorno simples.
-- Generalização: intervalos percentis de 95% de ROC-AUC, Brier Skill
-  e melhora de MAE contra zero. Reamostragens cronológicas em blocos,
-  estratificadas por fold, usando bloco de pelo menos 1 dia ou duas
-  vezes o horizonte futuro.
+## O que falta ao produto BTC/CASH
 
-Os intervalos consideram parte da dependência serial, mas não
-eliminam mudança de regime, sobreajuste ou viés de escolha.
+A próxima etapa é a máquina de estados CASH ↔ BTC, com:
+execução após o sinal conhecido, taxas, slippage, reinvestimento
+integral ou parametrizado, contabilização de cada ciclo, lucro líquido,
+capital final, CAGR, drawdown, Sharpe/Sortino, exposição e Buy and Hold.
 
-As métricas de teste não participam do treinamento nem da escolha
-da calibração.
-
-## Comparação controlada com o primeiro ZIP Binance
-
-Ao executar uma nova coleta, o início e o fim podem mudar
-de acordo com o calendário. Para não comparar períodos diferentes,
-o comando **replay** usa os candles do ZIP anterior e preserva
-os parâmetros de classificação, features, validação e folds.
-
-Na pasta da ML API:
-
-```bash
-git fetch origin
-git switch --track origin/feature/btc-direction-diagnostics-v2-20261108
-poetry run python -m pytest tests/test_forecast_diagnostics.py tests/test_forecast_comparison.py tests/test_forecast_replay.py -v
-poetry run python -m pytest -v
-```
-
-Para reproduzir a V2 a partir de uma auditoria original (coloque o ZIP
-na pasta do projeto ou informe o caminho real do arquivo):
-
-```bash
-poetry run python scripts/replay_btc_forecast.py "btc-forecast-audit-558e5d65-0c92-42a7-9f9b-6f15f197af47.zip"
-```
-
-O programa gera um arquivo `-v2-replay.zip` no mesmo diretório
-do original. Ele também verifica:
-
-1. Fonte Binance, símbolo e timeframes idênticos.
-2. Checksum do conteúdo dos históricos brutos, decisão e tendência.
-3. Exatamente as mesmas fronteiras de treino, validação, calibração
-   e teste, ignorando apenas novos campos de diagnóstico.
-4. A mesma sequência de retornos futuros realizados em cada horizonte.
-
-Se qualquer checagem falhar, a comparação é recusada. O replay
-não baixa dados de mercado, e o novo ZIP contém o SHA-256 da
-auditoria de origem. Não há fallback entre corretoras.
-
-Para comparar manualmente duas auditorias com os mesmos candles:
-
-```bash
-poetry run python scripts/compare_forecast_audits.py "V1.zip" "V2.zip"
-```
-
-## O que testar
-
-Primeiro comparar os valores por fold:
-
-- `split_nodes_used` passou a ser maior que zero?
-- `unique_predictions` da regressão de 2 e 6 horas aumentou?
-- As previsões de retorno passaram a superar retorno zero e
-  média histórica no período OOS?
-- A probabilidade calibrada melhorou contra a probabilidade bruta
-  e o baseline do treino?
-- Os intervalos de confiança excluem vantagem nula, ou o
-  sinal é apenas ruído temporal?
-
-**Não executar LHS ou CARO ainda:** só depois de confirmar
-modelos não degenerados e uma vantagem fora da amostra.
+Depois haverá paper trading, reconciliação de posições, recuperação
+de falhas, limites operacionais e isolamento por usuário.
+O objetivo final é lucro líquido ajustado ao risco, não apenas ROC-AUC.

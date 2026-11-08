@@ -65,6 +65,19 @@ PUT /v1/ml-settings
 
 Some parameters, such as CORS and worker concurrency, are marked `requires_restart` because those components are initialized when the process starts.
 
+## Replay V1 × V2 pelo Front
+
+Na aba BTC Forecast, selecione a execução original concluída do BTC
+Direction & Return com auditoria armazenada no banco. Clique em
+**Reexecutar e comparar V1 × V2**. A ML API cria uma nova execução
+que usa exclusivamente os candles persistidos, valida os folds e
+apresenta as métricas comparadas no próprio Front.
+
+A integração utiliza POST /v1/ml-backtests/{id}/replay e registra
+replay_parent_job_id na execução nova. O resultado completo fica
+em replay_comparison. Não há scripts ou caminhos de ZIP no fluxo
+do usuário.
+
 ## Backtest endpoints
 
 ```http
