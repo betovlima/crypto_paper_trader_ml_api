@@ -46,9 +46,9 @@ SPACE = (
 )
 MAX_DEV_CANDLES = 16000
 POLICY_SPACE = (
-    ("policy.entry_probability", "float", 0.51, 0.77),
+    ("policy.entry_probability", "float", 0.50, 0.64),
     ("policy.exit_probability", "float", 0.25, 0.49),
-    ("policy.entry_edge", "float", 0.0, 0.012),
+    ("policy.entry_edge", "float", 0.0, 0.002),
     ("policy.exit_return", "float", -0.018, 0.004),
     ("policy.min_positive_votes", "int", 1, 3),
     ("policy.stop_loss", "float", 0.012, 0.18),
@@ -415,6 +415,37 @@ def _score(
     }
 
 
+def _entry_diagnostics(joint_signals: dict, cfg: dict, fee: float, slippage: float) -> dict:
+    """Explain the opportunity funnel without using any realized returns."""
+    required_cost = (1 + slippage) / ((1 - fee) ** 2 * (1 - slippage)) - 1
+    samples = list(joint_signals.values())
+    return {
+        "total_aligned_signals": len(samples),
+        "required_round_trip_return": float(required_cost),
+        "required_entry_return": float(required_cost + cfg["policy.entry_edge"]),
+        "passes_votes": sum(
+            int(s["positive_votes"] >= cfg["policy.min_positive_votes"]) for s in samples
+        ),
+        "passes_probability": sum(
+            int(s["p_up"] >= cfg["policy.entry_probability"]) for s in samples
+        ),
+        "passes_expected_return": sum(
+            int(s["predicted_return"] > required_cost + cfg["policy.entry_edge"])
+            for s in samples
+        ),
+        "passes_all_entry_filters": sum(int(
+            s["positive_votes"] >= cfg["policy.min_positive_votes"]
+            and s["p_up"] >= cfg["policy.entry_probability"]
+            and s["predicted_return"] > required_cost + cfg["policy.entry_edge"]
+        ) for s in samples),
+        "max_probability": max((float(s["p_up"]) for s in samples), default=None),
+        "max_predicted_return": max(
+            (float(s["predicted_return"]) for s in samples), default=None
+        ),
+    }
+
+
+
 def _combine_horizon_metrics(
     results: dict[str, dict],
     *, scoring: pd.DataFrame | None = None, policy: dict | None = None,
@@ -449,6 +480,7 @@ def _combine_horizon_metrics(
             horizon_signals[nxt] = {**prediction, "signal_at": candles[nxt]["timestamp"].isoformat()}
         signals_by_horizon[h] = horizon_signals
     joint_signals = aggregate_signals(signals_by_horizon, cfg)
+    diagnostics = _entry_diagnostics(joint_signals, cfg, fee, slippage)
     simulated = simulate_rotations(
         candles, joint_signals, cfg, initial_capital=10000,
         fee=fee, slippage=slippage, bar_seconds=bar_seconds,
@@ -491,6 +523,7 @@ def _combine_horizon_metrics(
             } for h in JOINT_HORIZONS
         },
         "capital_note": "Um patrimônio BTC/CASH reinvestido; custos incluídos",
+        "entry_diagnostics": diagnostics,
         "policy": cfg,
     }
 
@@ -572,7 +605,10 @@ def _run_optimization(strategy_id: str) -> None:
                     bar_seconds=TIMEFRAME_SECONDS[original.decision_timeframe],
                 )
                 score = metrics["score"]
-                entry = {"trial": index + 1, "status": "COMPLETED",
+                # Training can complete successfully without producing a
+                # tradable strategy. An idle CASH result must never win.
+                entry = {"trial": index + 1,
+                         "status": "COMPLETED" if metrics.get("completed_cycles", metrics.get("buys", 0)) > 0 else "NO_TRADES",
                          "parameters": candidate, "metrics": metrics}
             except Exception as exc:
                 score = -1000.0
@@ -594,6 +630,32 @@ def _run_optimization(strategy_id: str) -> None:
                 _update_strategy(strategy_id, status="CANCELLED", error_message=None)
                 return
         if winner is None:
+            inactive = [entry for entry in records if entry["status"] == "NO_TRADES"]
+            unsuccessful = [entry for entry in records if entry["status"] == "FAILED"]
+            if inactive:
+                diagnostic = inactive[0]["metrics"].get("entry_diagnostics", {})
+                summary = {
+                    "validation_kind": "INTERNAL_PRE_OOS_CHRONOLOGICAL",
+                    "oos_untouched_from": first_oos.isoformat(),
+                    "horizons_hours": list(horizons),
+                    "optimization_target": "NET_COMPOUNDED_BTC_CASH_CAPITAL",
+                    "completed_trials": 0,
+                    "inactive_trials": len(inactive),
+                    "failed_trials": len(unsuccessful),
+                    "diagnostic_example": diagnostic,
+                    "selection_warning": "Sem compras na validação; não há candidato econômico vencedor.",
+                }
+                _update_strategy(
+                    strategy_id, status="NO_TRADES", progress=100,
+                    champion_json=None,
+                    summary_json=json.dumps(summary, allow_nan=False),
+                    error_message=(
+                        f"Os {len(inactive)} candidatos treinados não realizaram compras BTC/CASH. "
+                        "Consulte os filtros de entrada por tentativa. "
+                        "Não existe vencedor para executar fora da amostra."
+                    ),
+                )
+                return
             raise ValueError("Nenhum candidato LightGBM conseguiu ser treinado")
         # Freeze ALL active learner parameters, not just the seven searched
         # dimensions. Later DB edits must not silently change this champion.
@@ -626,6 +688,7 @@ def _run_optimization(strategy_id: str) -> None:
             "capital_definition": "10,000 USDT, BTC/CASH, 100% reinvestimento, taxa/slippage do backtest original",
             "initial_capital_for_selection": 10000,
             "completed_trials": sum(item["status"] == "COMPLETED" for item in records),
+            "inactive_trials": sum(item["status"] == "NO_TRADES" for item in records),
             "failed_trials": sum(item["status"] == "FAILED" for item in records),
             "historical_source_job_id": row.source_job_id,
             "selection_warning": "Resultados de seleção interna, não são o teste final OOS.",
