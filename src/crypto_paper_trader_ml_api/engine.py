@@ -8,7 +8,8 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, brier_score_loss, log_loss, precision_score, roc_auc_score
-from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
+from .lightgbm_models import fit_classifier
 
 from . import __version__
 from .audit_export import build_audit_archive
@@ -48,31 +49,11 @@ def _fit_model(
     x_validation: pd.DataFrame,
     y_validation: np.ndarray,
     parameters: RuntimeParameters,
-) -> XGBClassifier | None:
-    if len(np.unique(y_train)) < 2:
-        return None
-    positive = max(1, int(y_train.sum()))
-    negative = max(1, int(len(y_train) - positive))
-    model = XGBClassifier(
-        objective=parameters.string("xgboost.objective"),
-        eval_metric=parameters.string("xgboost.eval_metric"),
-        tree_method=parameters.string("xgboost.tree_method"),
-        n_estimators=parameters.integer("xgboost.n_estimators"),
-        max_depth=parameters.integer("xgboost.max_depth"),
-        learning_rate=parameters.floating("xgboost.learning_rate"),
-        min_child_weight=parameters.floating("xgboost.min_child_weight"),
-        subsample=parameters.floating("xgboost.subsample"),
-        colsample_bytree=parameters.floating("xgboost.colsample_bytree"),
-        gamma=parameters.floating("xgboost.gamma"),
-        reg_alpha=parameters.floating("xgboost.reg_alpha"),
-        reg_lambda=parameters.floating("xgboost.reg_lambda"),
-        scale_pos_weight=negative / positive,
-        random_state=parameters.integer("xgboost.random_state"),
-        n_jobs=parameters.integer("xgboost.n_jobs"),
-        early_stopping_rounds=parameters.integer("xgboost.early_stopping_rounds"),
+) -> LGBMClassifier | None:
+    """Chronological LightGBM classification for both legacy and direct research."""
+    return fit_classifier(
+        x_train, y_train, x_validation, y_validation, parameters
     )
-    model.fit(x_train, y_train, eval_set=[(x_validation, y_validation)], verbose=False)
-    return model
 
 
 def walk_forward_predict(
@@ -113,7 +94,7 @@ def walk_forward_predict(
     predictions: list[pd.DataFrame] = []
     importance_accumulator = np.zeros(len(columns), dtype=float)
     trained_models = 0
-    solver = parameters.string("xgboost.calibration_solver")
+    solver = parameters.string("lightgbm.calibration_solver")
     purge_candles = parameters.integer("labels.horizon_candles")
     fold_windows: list[dict] = []
 
@@ -346,7 +327,7 @@ def simulate_portfolio(
             target_price = entry_price + initial_target_atr * atr
             bar_actions.append({
                 "action": "BUY", "execution_price": round(entry_price, 8),
-                "reason": pending_reason or "XGB_ENTRY",
+                "reason": pending_reason or "LIGHTGBM_ENTRY",
             })
             pending_action = None
         elif pending_action == "SELL" and quantity > 0:
@@ -432,13 +413,13 @@ def simulate_portfolio(
                 entry_combined_passes += int(probability_ok and trend_ok)
                 if probability_ok and trend_ok:
                     pending_action = "BUY"
-                    pending_reason = "XGB_ENTRY"
+                    pending_reason = "LIGHTGBM_ENTRY"
             elif quantity > 0 and pending_action is None:
                 model_exit = float(row["exit_probability"]) >= request.exit_threshold
                 trend_lost = close_price < float(row[medium_ema])
                 if model_exit or trend_lost:
                     pending_action = "SELL"
-                    pending_reason = "XGB_EXIT" if model_exit else "TREND_INVALIDATION"
+                    pending_reason = "LIGHTGBM_EXIT" if model_exit else "TREND_INVALIDATION"
 
         equity = cash + quantity * close_price
         buy_hold = (
@@ -619,8 +600,8 @@ def calculate_results(
         },
         "comparisons": [
             {
-                "code": "XGBOOST_WALK_FORWARD",
-                "name": "XGBoost Walk-Forward",
+                "code": "LIGHTGBM_WALK_FORWARD",
+                "name": "LightGBM Walk-Forward",
                 "capital_final": round(capital_final, 4),
                 "return_total": round(total_return, 6),
                 "max_drawdown": round(strategy_drawdown, 6),
