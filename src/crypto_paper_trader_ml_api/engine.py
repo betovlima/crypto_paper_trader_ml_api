@@ -13,6 +13,7 @@ from xgboost import XGBClassifier
 from . import __version__
 from .features import atr_column, build_features, create_labels, feature_names, signal_ema_columns
 from .mexc import MEXCHistoryClient, TIMEFRAME_SECONDS
+from .rotation_analysis import build_rotation_timeline
 from .schemas import ResolvedMLBacktestCreate
 from .settings_service import RuntimeParameters
 
@@ -230,6 +231,7 @@ def simulate_portfolio(
     fees_paid = 0.0
     trades: list[dict] = []
     equity_rows: list[dict] = []
+    rotation_rows: list[dict] = []
     exposed_bars = 0
     pending_action: str | None = None
     pending_reason: str | None = None
@@ -244,6 +246,7 @@ def simulate_portfolio(
 
     first_close = float(frame.iloc[0]["close"])
     for index, row in frame.iterrows():
+        bar_actions: list[dict] = []
         open_price = float(row["open"])
         close_price = float(row["close"])
         atr = max(float(row[atr_name]), close_price * minimum_atr_fraction)
@@ -260,6 +263,10 @@ def simulate_portfolio(
             entry_time = row["timestamp"]
             stop_price = entry_price - initial_stop_atr * atr
             target_price = entry_price + initial_target_atr * atr
+            bar_actions.append({
+                "action": "BUY", "execution_price": round(entry_price, 8),
+                "reason": pending_reason or "XGB_ENTRY",
+            })
             pending_action = None
         elif pending_action == "SELL" and quantity > 0:
             execution = open_price * (1 - request.slippage_rate)
@@ -280,6 +287,10 @@ def simulate_portfolio(
                     "reason": pending_reason or "MODEL_EXIT",
                 }
             )
+            bar_actions.append({
+                "action": "SELL", "execution_price": round(execution, 8),
+                "reason": pending_reason or "MODEL_EXIT",
+            })
             quantity = 0.0
             entry_price = 0.0
             entry_time = None
@@ -314,6 +325,10 @@ def simulate_portfolio(
                         "reason": reason,
                     }
                 )
+                bar_actions.append({
+                    "action": "SELL", "execution_price": round(execution, 8),
+                    "reason": reason,
+                })
                 quantity = 0.0
                 entry_price = 0.0
                 entry_time = None
@@ -348,6 +363,14 @@ def simulate_portfolio(
                 "buy_hold": buy_hold,
             }
         )
+        rotation_rows.append({
+            "timestamp": pd.Timestamp(row["timestamp"]).isoformat(),
+            "btc_close": close_price,
+            "position": "BTC" if quantity > 0 else "CASH",
+            "equity": equity,
+            "buy_hold": buy_hold,
+            "actions": bar_actions,
+        })
 
     if quantity > 0:
         final_row = frame.iloc[-1]
@@ -370,12 +393,19 @@ def simulate_portfolio(
             }
         )
         equity_rows[-1]["equity"] = cash
+        rotation_rows[-1]["equity"] = cash
+        rotation_rows[-1]["position"] = "CASH"
+        rotation_rows[-1]["actions"].append({
+            "action": "SELL", "execution_price": round(execution, 8),
+            "reason": "END_OF_TEST",
+        })
 
     return {
         "capital_final": cash,
         "fees_paid": fees_paid,
         "trades": trades,
         "equity_curve": equity_rows,
+        "rotation_rows": rotation_rows,
         "exposure": exposed_bars / max(1, len(frame)),
     }
 
@@ -493,6 +523,9 @@ def calculate_results(
         ],
         "trades": trades[-maximum_trades:],
         "equity_curve": sampled_curve,
+        "rotation_timeline": build_rotation_timeline(
+            simulation.get("rotation_rows", []), maximum_points
+        ),
         "insights": {
             "top_features": [
                 item["feature"] for item in model_metadata["feature_importance"][:insight_features]
