@@ -97,6 +97,25 @@ def test_new_strategy_uses_all_horizons_and_rejects_incomplete_archive():
         _cleanup(source)
 
 
+def test_api_defaults_to_joint_research_without_horizon_field():
+    source = _insert_source()
+    _give_source_three_horizons(source)
+    try:
+        with TestClient(app) as client:
+            response = client.post("/v1/ml-strategies", json={
+                "name": "BTC LightGBM 2h+6h+24h",
+                "source_job_id": source,
+            })
+            assert response.status_code == 201, response.text
+            assert response.json()["horizon_hours"] == 0
+            assert response.json()["horizons_hours"] == [2, 6, 24]
+            selected = client.get("/v1/ml-strategies/" + response.json()["id"])
+            assert selected.status_code == 200
+            assert selected.json()["horizons_hours"] == [2, 6, 24]
+    finally:
+        _cleanup(source)
+
+
 def test_one_optimization_campaign_evaluates_all_horizons_without_oos_leakage(monkeypatch):
     source = _insert_source()
     _give_source_three_horizons(source)
