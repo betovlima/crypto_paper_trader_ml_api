@@ -92,3 +92,25 @@ def test_buy_and_hold_deducts_the_same_trade_costs_as_strategy():
     assert result["models"]["entry"]["baseline_brier_score"] is not None
     assert result["models"]["entry"]["brier_skill_score"] is not None
     assert result["comparisons"][1]["capital_final"] == pytest.approx(expected_final, abs=1e-3)
+
+
+def test_buy_and_hold_drawdown_includes_entry_and_exit_execution_costs():
+    request = ResolvedMLBacktestCreate(
+        symbol="BTCUSDT", period_years=1, decision_timeframe="30min",
+        trend_timeframe="4hour", initial_capital=1000,
+        fee_rate=0.002, slippage_rate=0.001,
+        entry_threshold=0.99, exit_threshold=0.99, reinvestment=True,
+    )
+    frame = prediction_frame(8)
+    for column in ("open", "high", "low", "close"):
+        frame[column] = 100.0
+    params = default_parameters()
+    simulation = simulate_portfolio(frame, request, params)
+    result = calculate_results(
+        frame, request, simulation, {"fold_count": 1, "feature_importance": []},
+        params,
+    )
+    buy_and_hold = result["comparisons"][1]
+    assert buy_and_hold["max_drawdown"] < 0
+    assert buy_and_hold["return_total"] < 0
+    assert result["summary"]["max_drawdown"] == 0

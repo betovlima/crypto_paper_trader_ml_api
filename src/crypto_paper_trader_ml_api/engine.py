@@ -524,6 +524,9 @@ def calculate_results(
 ) -> dict:
     equity = np.array([row["equity"] for row in simulation["equity_curve"]], dtype=float)
     buy_hold_curve = np.array([row["buy_hold"] for row in simulation["equity_curve"]], dtype=float)
+    # Compare drawdowns against the original capital before execution costs.
+    strategy_drawdown = _max_drawdown(np.r_[request.initial_capital, equity])
+    benchmark_drawdown = _max_drawdown(np.r_[request.initial_capital, buy_hold_curve])
     returns = pd.Series(equity).pct_change().dropna().to_numpy()
     downside = returns[returns < 0]
     periods_per_year = 365.25 * 86400 / TIMEFRAME_SECONDS[request.decision_timeframe]
@@ -580,7 +583,7 @@ def calculate_results(
             "capital_final": round(capital_final, 4),
             "return_total": round(total_return, 6),
             "cagr": round(cagr, 6),
-            "max_drawdown": round(_max_drawdown(equity), 6),
+            "max_drawdown": round(strategy_drawdown, 6),
             "sharpe": round(sharpe, 4),
             "sortino": round(sortino, 4),
             "profit_factor": round(gross_profit / gross_loss, 4) if gross_loss > 0 else None,
@@ -617,7 +620,7 @@ def calculate_results(
                 "name": "XGBoost Walk-Forward",
                 "capital_final": round(capital_final, 4),
                 "return_total": round(total_return, 6),
-                "max_drawdown": round(_max_drawdown(equity), 6),
+                "max_drawdown": round(strategy_drawdown, 6),
                 "sharpe": round(sharpe, 4),
             },
             {
@@ -625,7 +628,7 @@ def calculate_results(
                 "name": "Buy and Hold",
                 "capital_final": round(float(buy_hold_curve[-1]), 4),
                 "return_total": round(float(buy_hold_curve[-1] / request.initial_capital - 1), 6),
-                "max_drawdown": round(_max_drawdown(buy_hold_curve), 6),
+                "max_drawdown": round(benchmark_drawdown, 6),
                 "sharpe": None,
                 "benchmark_costs_included": True,
             },
