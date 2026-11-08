@@ -8,7 +8,7 @@ Frontend
 └── Machine Learning Backtest API
 ```
 
-The ML API owns its own database, parameter catalog, XGBoost jobs and results. It does not change the live paper-trading API.
+The ML API owns its own database, parameter catalog, LightGBM jobs and results. It does not change the live paper-trading API.
 
 ## Parameter flow
 
@@ -32,7 +32,7 @@ Resolved request + immutable database snapshot
                  ↓
 ml_backtest_jobs.settings_snapshot_json
                  ↓
-Market data → features → labels → XGBoost → walk-forward → simulation
+Market data → features → labels → LightGBM → walk-forward → simulation
 ```
 
 Every job uses the snapshot captured at creation. Editing the current catalog does not mutate running or historical executions.
@@ -63,7 +63,7 @@ The browser also requires `VITE_API_URL` and `VITE_ML_API_URL` to locate the two
 - `settings_service.py`: database loading, row-based validation, updates and immutable snapshots.
 - `mexc.py`: database-parameterized paginated closed-candle collection.
 - `features.py`: database-parameterized features and labels.
-- `engine.py`: XGBoost, calibration, walk-forward simulation and metrics.
+- `engine.py`: LightGBM, calibration, walk-forward simulation and metrics.
 - `service.py`: asynchronous jobs and snapshot enforcement.
 - `app.py`: REST endpoints.
 
