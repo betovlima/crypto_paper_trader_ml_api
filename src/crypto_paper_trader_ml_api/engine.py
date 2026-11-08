@@ -11,6 +11,7 @@ from sklearn.metrics import average_precision_score, brier_score_loss, log_loss,
 from xgboost import XGBClassifier
 
 from . import __version__
+from .audit_export import build_audit_archive
 from .features import atr_column, build_features, create_labels, feature_names, signal_ema_columns
 from .mexc import MEXCHistoryClient, TIMEFRAME_SECONDS
 from .rotation_analysis import build_rotation_timeline
@@ -542,6 +543,7 @@ def run_ml_backtest(
     parameters: RuntimeParameters,
     progress: Callable[[int, str], None],
     cancelled: Callable[[], bool],
+    audit_writer: Callable[[bytes], None] | None = None,
 ) -> dict:
     client = MEXCHistoryClient(parameters, __version__)
     try:
@@ -574,6 +576,16 @@ def run_ml_backtest(
         simulation = simulate_portfolio(predicted, request, parameters)
         progress(92, "Calculating financial and model metrics")
         result = calculate_results(predicted, request, simulation, metadata, parameters)
+        if audit_writer is not None:
+            progress(95, "Preparing full audit export")
+            audit_writer(build_audit_archive(
+                predictions=predicted,
+                simulation=simulation,
+                request=request,
+                parameters=parameters,
+                result=result,
+                model_metadata=metadata,
+            ))
         progress(100, "Completed")
         return result
     finally:
