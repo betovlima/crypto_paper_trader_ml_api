@@ -11,6 +11,7 @@ from sqlalchemy import desc
 
 from .database import MLBacktestAudit, MLBacktestJob, SessionLocal
 from .engine import run_ml_backtest
+from .mexc import TIMEFRAME_SECONDS
 from .direct_forecast import run_direction_backtest
 from .schemas import MLBacktestCreate, ResolvedMLBacktestCreate
 from .settings_service import (

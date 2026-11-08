@@ -125,7 +125,44 @@ def synchronize_parameter_catalog() -> None:
                 updated_at=now,
             ))
         # Add direct forecast settings without replacing existing runtime choices.
-        forecast_defaults = [{"key":"backtest.default_experiment_type","category":"Backtest","label":"Default experiment type","description":"Choose independent direction/return research or the existing target/stop strategy.","value_type":"string","value":"TARGET_STOP","constraints":{"options":["TARGET_STOP","BTC_DIRECTION_RETURN"]},"public":true,"requires_restart":false,"display_order":111},{"key":"forecast.horizons_hours","category":"BTC Forecast","label":"Forecast horizons (hours)","description":"Future BTC closing-price return horizons in hours, all evaluated separately.","value_type":"integer_list","value":[2,6,24],"constraints":{"minimum":1,"maximum":72},"public":true,"requires_restart":false,"display_order":112},{"key":"forecast.maximum_folds","category":"BTC Forecast","label":"Maximum temporal folds","description":"Maximum number of independent chronological out-of-sample folds for direct BTC forecasts.","value_type":"integer","value":3,"constraints":{"minimum":2,"maximum":6},"public":true,"requires_restart":false,"display_order":113}]
+        forecast_defaults = [
+            {
+                "key": "backtest.default_experiment_type",
+                "category": "Backtest",
+                "label": "Default experiment type",
+                "description": "Target/stop strategy or independent BTC movement research.",
+                "value_type": "string",
+                "value": "TARGET_STOP",
+                "constraints": {"options": ["TARGET_STOP", "BTC_DIRECTION_RETURN"]},
+                "public": True,
+                "requires_restart": False,
+                "display_order": 111,
+            },
+            {
+                "key": "forecast.horizons_hours",
+                "category": "BTC Forecast",
+                "label": "Forecast horizons (hours)",
+                "description": "Chronologically validated future BTC return horizons.",
+                "value_type": "integer_list",
+                "value": [2, 6, 24],
+                "constraints": {"minimum": 1, "maximum": 72},
+                "public": True,
+                "requires_restart": False,
+                "display_order": 112,
+            },
+            {
+                "key": "forecast.maximum_folds",
+                "category": "BTC Forecast",
+                "label": "Maximum independent temporal folds",
+                "description": "Maximum number of OOS folds for direct BTC forecasting.",
+                "value_type": "integer",
+                "value": 3,
+                "constraints": {"minimum": 2, "maximum": 6},
+                "public": True,
+                "requires_restart": False,
+                "display_order": 113,
+            },
+        ]
         for item in forecast_defaults:
             if item["key"] not in existing_keys:
                 session.add(MLRuntimeParameter(
