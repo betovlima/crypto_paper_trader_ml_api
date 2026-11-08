@@ -644,9 +644,10 @@ def _validate_cross_parameter_values(values: dict[str, Any]) -> None:
         raise ParameterValidationError("Regressor early stopping must be shorter than max trees")
     if int(values["lightgbm.early_stopping_rounds"]) >= int(values["lightgbm.n_estimators"]):
         raise ParameterValidationError("LightGBM classifier patience must be less than maximum trees")
-    for prefix in ("lightgbm", "forecast.regression"):
-        if int(values[f"{prefix}.num_leaves"]) > 2 ** int(values[f"{prefix}.max_depth"]):
-            raise ParameterValidationError(f"{prefix}.num_leaves exceeds binary depth capacity")
+    if int(values["lightgbm.num_leaves"]) > 2 ** int(values["lightgbm.max_depth"]):
+        raise ParameterValidationError("lightgbm.num_leaves exceeds binary depth capacity")
+    if int(values["forecast.regression_num_leaves"]) > 2 ** int(values["forecast.regression_max_depth"]):
+        raise ParameterValidationError("forecast.regression_num_leaves exceeds binary depth capacity")
     if (float(values["lightgbm.subsample"]) < 1.0
             and int(values["lightgbm.subsample_freq"]) == 0):
         raise ParameterValidationError("LightGBM subsample_freq must be positive when sampling rows")
