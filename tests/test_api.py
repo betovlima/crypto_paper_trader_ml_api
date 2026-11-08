@@ -18,6 +18,13 @@ def test_health_and_database_configuration() -> None:
     assert configuration.json()["options"]["decision_timeframes"]
     assert configuration.json()["options"]["history_sources"] == ["MEXC", "BINANCE_SPOT_ARCHIVE"]
     assert configuration.json()["defaults"]["history_source"] in {"MEXC", "BINANCE_SPOT_ARCHIVE"}
+    assert configuration.json()["defaults"]["experiment_type"] == "TARGET_STOP"
+    assert configuration.json()["options"]["experiment_types"] == ["TARGET_STOP", "BTC_DIRECTION_RETURN"]
+    assert configuration.json()["options"]["forecast_horizons_hours"] == [2, 6, 24]
+    visible = {item["key"]: item for item in settings.json()["parameters"]}
+    assert visible["forecast.horizons_hours"]["value"] == [2, 6, 24]
+    assert visible["forecast.maximum_folds"]["value"] == 3
+    assert visible["backtest.default_experiment_type"]["value"] == "TARGET_STOP"
     assert configuration.json()["ui"]["job_poll_interval_ms"] > 0
     assert settings.status_code == 200
     assert len(settings.json()["parameters"]) > 50
