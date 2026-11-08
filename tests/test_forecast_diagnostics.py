@@ -17,9 +17,11 @@ from .helpers import default_parameters
 
 
 def test_independent_scaled_regressor_learns_nonconstant_returns_without_changing_units():
-    x = np.linspace(-1.5, 1.5, 640)
+    x = np.sin(np.arange(640) / 21.0)
+    # Both chronological partitions contain both market regimes; a tree
+    # cannot extrapolate beyond the training feature range.
     # The target is a small *decimal* return. Training scales it to bps.
-    returns = 0.007 * np.sin(x * 3.0) + 0.003 * x
+    returns = 0.007 * x + 0.003 * x**2
     frame = pd.DataFrame({
         "signal": x,
         "forecast_realized_return": returns,
@@ -63,14 +65,14 @@ def test_regression_can_be_constant_with_all_single_leaf_trees_and_diagnosed():
     params = default_parameters(**{
         "forecast.regression_n_estimators": 20,
         "forecast.regression_early_stopping_rounds": 4,
-        "forecast.regression_gamma": 1e6,
+        "forecast.regression_gamma": 1000.0,
         "forecast.regression_reg_alpha": 0.0,
-        "forecast.regression_target_scale": 10000.0,
+        "forecast.regression_target_scale": 1.0,
         "xgboost.n_jobs": 1,
     })
     model = _regressor(frame.iloc[:130], frame.iloc[130:], ["signal"], params)
     assert model is not None
-    prediction = model.predict(frame[["signal"]]) / 10000.0
+    prediction = model.predict(frame[["signal"]])
     details = tree_diagnostics(model, prediction)
     assert details["trained"] is True
     assert details["split_nodes_used"] == 0
