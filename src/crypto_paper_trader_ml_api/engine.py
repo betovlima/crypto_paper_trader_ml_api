@@ -113,6 +113,8 @@ def walk_forward_predict(
     importance_accumulator = np.zeros(len(columns), dtype=float)
     trained_models = 0
     solver = parameters.string("xgboost.calibration_solver")
+    purge_candles = parameters.integer("labels.horizon_candles")
+    fold_windows: list[dict] = []
 
     for fold in range(fold_count):
         if cancelled():
@@ -126,11 +128,32 @@ def walk_forward_predict(
             parameters.integer("walk_forward.validation_minimum"),
             int(len(train_block) * parameters.floating("walk_forward.validation_fraction")),
         )
-        if validation_size >= len(train_block):
+        # Purge the entire target horizon before both the calibration and
+        # test partitions. No training label may observe a validation candle;
+        # no calibration label may observe a test candle.
+        validation_end = train_end - purge_candles
+        validation_start = validation_end - validation_size
+        training_end = validation_start - purge_candles
+        if training_end <= purge_candles or validation_start < 0:
             continue
-        training = train_block.iloc[:-validation_size]
-        validation = train_block.iloc[-validation_size:]
+        training = usable.iloc[:training_end]
+        validation = usable.iloc[validation_start:validation_end]
         testing = usable.iloc[train_end:test_end].copy()
+        if len(validation) < parameters.integer("walk_forward.validation_minimum"):
+            continue
+        # Audit the actual timestamp of label availability, not merely row
+        # offsets. Conservative purging also covers gaps in market candles.
+        if "label_available_at" in usable:
+            training = training[
+                pd.to_datetime(training["label_available_at"], utc=True)
+                < pd.Timestamp(validation.iloc[0]["timestamp"])
+            ]
+            validation = validation[
+                pd.to_datetime(validation["label_available_at"], utc=True)
+                < pd.Timestamp(testing.iloc[0]["timestamp"])
+            ]
+        if training.empty or validation.empty:
+            continue
 
         x_train = training[columns]
         x_validation = validation[columns]
@@ -168,7 +191,31 @@ def walk_forward_predict(
         exit_calibrator.fit(raw_exit_validation, exit_validation)
         testing["entry_probability"] = entry_calibrator.transform(raw_entry_test)
         testing["exit_probability"] = exit_calibrator.transform(raw_exit_test)
+        # Reference probabilities depend only on the training partition.
+        testing["entry_baseline_probability"] = float(np.mean(entry_train))
+        testing["exit_baseline_probability"] = float(np.mean(exit_train))
         testing["walk_forward_fold"] = fold + 1
+        fold_windows.append({
+            "fold": fold + 1,
+            "training_rows": len(training),
+            "training_start": pd.Timestamp(training.iloc[0]["timestamp"]).isoformat(),
+            "training_end": pd.Timestamp(training.iloc[-1]["timestamp"]).isoformat(),
+            "training_last_label_available_at": (
+                pd.Timestamp(training.iloc[-1]["label_available_at"]).isoformat()
+                if "label_available_at" in training else None
+            ),
+            "validation_rows": len(validation),
+            "validation_start": pd.Timestamp(validation.iloc[0]["timestamp"]).isoformat(),
+            "validation_end": pd.Timestamp(validation.iloc[-1]["timestamp"]).isoformat(),
+            "validation_last_label_available_at": (
+                pd.Timestamp(validation.iloc[-1]["label_available_at"]).isoformat()
+                if "label_available_at" in validation else None
+            ),
+            "test_rows": len(testing),
+            "test_start": pd.Timestamp(testing.iloc[0]["timestamp"]).isoformat(),
+            "test_end": pd.Timestamp(testing.iloc[-1]["timestamp"]).isoformat(),
+            "purge_candles_at_each_boundary": purge_candles,
+        })
         predictions.append(testing)
         progress(45 + int(28 * (fold + 1) / fold_count), f"Walk-forward fold {fold + 1}/{fold_count}")
 
@@ -188,6 +235,8 @@ def walk_forward_predict(
     )[: parameters.integer("walk_forward.feature_importance_limit")]
     return out_of_sample.reset_index(drop=True), {
         "fold_count": int(out_of_sample["walk_forward_fold"].max()),
+        "fold_windows": fold_windows,
+        "label_horizon_candles": purge_candles,
         "feature_importance": feature_importance,
         "feature_columns": columns,
     }
