@@ -61,6 +61,7 @@ class MLBacktestJobResponse(BaseModel):
 
 
 class MLBacktestJobDetail(MLBacktestJobResponse):
+    audit_available: bool = False
     request: dict
     settings_snapshot: dict | None
     result: dict | None

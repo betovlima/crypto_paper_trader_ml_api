@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Response
 
 from . import __version__
 from .cors import DatabaseCORSMiddleware
@@ -17,7 +17,7 @@ from .schemas import (
     RuntimeParametersResponse,
     RuntimeParametersUpdateRequest,
 )
-from .service import cancel_job, create_job, get_job, list_jobs
+from .service import cancel_job, create_job, get_audit_zip, get_job, list_jobs
 from .settings_service import (
     ParameterValidationError,
     get_runtime_parameters,
@@ -139,6 +139,28 @@ def backtest_trades(job_id: str) -> list[dict]:
     if not job:
         raise HTTPException(status_code=404, detail="ML backtest not found")
     return (job.get("result") or {}).get("trades", [])
+
+
+@app.get("/v1/ml-backtests/{job_id}/audit.zip")
+def backtest_audit_archive(job_id: str) -> Response:
+    status, archive = get_audit_zip(job_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="ML backtest not found")
+    if status != "COMPLETED":
+        raise HTTPException(status_code=409, detail="ML backtest has not completed")
+    if archive is None:
+        raise HTTPException(
+            status_code=409,
+            detail="This execution predates the full audit export. Run a new backtest to generate it.",
+        )
+    return Response(
+        content=archive,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="btc-forecast-audit-{job_id}.zip"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @app.delete("/v1/ml-backtests/{job_id}", response_model=MLBacktestJobResponse)
