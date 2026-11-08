@@ -44,3 +44,14 @@ def test_walk_forward_generates_out_of_sample_probabilities() -> None:
     assert predicted["exit_probability"].between(0, 1).all()
     assert metadata["fold_count"] >= 3
     assert metadata["feature_importance"]
+    assert metadata["label_horizon_candles"] == parameters.integer("labels.horizon_candles")
+    assert len(metadata["fold_windows"]) == metadata["fold_count"]
+    for window in metadata["fold_windows"]:
+        assert window["training_rows"] > 0
+        assert window["validation_rows"] > 0
+        assert window["test_rows"] > 0
+        assert window["purge_candles_at_each_boundary"] == parameters.integer("labels.horizon_candles")
+        assert pd.Timestamp(window["training_last_label_available_at"]) < pd.Timestamp(window["validation_start"])
+        assert pd.Timestamp(window["validation_last_label_available_at"]) < pd.Timestamp(window["test_start"])
+    assert predicted["entry_baseline_probability"].between(0, 1).all()
+    assert predicted["exit_baseline_probability"].between(0, 1).all()

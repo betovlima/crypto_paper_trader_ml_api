@@ -37,3 +37,59 @@ def test_labels_are_binary_for_usable_rows() -> None:
     labelled = create_labels(build_features(synthetic_candles(), parameters), parameters)
     values = set(labelled["entry_label"].dropna().unique())
     assert values.issubset({0.0, 1.0})
+
+
+def test_four_hour_indicators_are_not_visible_until_their_candle_closes():
+    parameters = default_parameters(**{
+        "features.trend_ema_fast": 2,
+        "features.trend_ema_slow": 3,
+        "features.trend_slope_period": 1,
+    })
+    decision = synthetic_candles(96)
+    trend = decision.iloc[::8].copy().reset_index(drop=True)
+    original = build_features(
+        decision, parameters, trend,
+        decision_timeframe="30min", trend_timeframe="4hour",
+    )
+    changed = trend.copy()
+    # 08:00 candle closes at 12:00, so changing it cannot alter
+    # any 30-minute indicator whose observation time precedes 12:00.
+    changed.loc[2, "close"] = changed.loc[2, "close"] * 5
+    updated = build_features(
+        decision, parameters, changed,
+        decision_timeframe="30min", trend_timeframe="4hour",
+    )
+    before_close = original["decision_available_at"] < pd.Timestamp(
+        "2024-01-01T12:00:00Z"
+    )
+    pd.testing.assert_series_equal(
+        original.loc[before_close, "trend_ema_gap"],
+        updated.loc[before_close, "trend_ema_gap"],
+    )
+    pd.testing.assert_series_equal(
+        original.loc[before_close, "trend_ema_slope"],
+        updated.loc[before_close, "trend_ema_slope"],
+    )
+    eligible = original.loc[
+        original["timestamp"] == pd.Timestamp("2024-01-01T11:30:00Z")
+    ].iloc[0]
+    assert eligible["trend_source_open_at"] == pd.Timestamp("2024-01-01T08:00:00Z")
+    assert eligible["trend_available_at"] <= eligible["decision_available_at"]
+    assert updated.loc[~before_close, "trend_ema_gap"].ne(
+        original.loc[~before_close, "trend_ema_gap"]
+    ).any()
+
+
+def test_future_label_availability_is_recorded_for_fold_purging():
+    params = default_parameters(**{"labels.horizon_candles": 4})
+    featured = build_features(
+        synthetic_candles(40), params,
+        decision_timeframe="30min",
+    )
+    labelled = create_labels(featured, params)
+    assert labelled["label_available_at"].iloc[0] == pd.Timestamp(
+        "2024-01-01T02:30:00Z"
+    )
+    assert pd.isna(labelled["label_available_at"].iloc[-1])
+    assert pd.isna(labelled["entry_label"].iloc[-1])
+    assert pd.notna(labelled["entry_label"].iloc[-5])

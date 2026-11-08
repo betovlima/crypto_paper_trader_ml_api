@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from crypto_paper_trader_ml_api.engine import calculate_results, simulate_portfolio
 from crypto_paper_trader_ml_api.schemas import ResolvedMLBacktestCreate
@@ -58,3 +59,36 @@ def test_simulation_returns_financial_summary() -> None:
     assert result["execution"]["walk_forward_folds"] == 3
     assert result["execution"]["parameter_source"] == "DATABASE_SNAPSHOT"
     assert len(result["equity_curve"]) > 0
+
+
+def test_buy_and_hold_deducts_the_same_trade_costs_as_strategy():
+    request = ResolvedMLBacktestCreate(
+        symbol="BTCUSDT", period_years=1, decision_timeframe="30min",
+        trend_timeframe="4hour", initial_capital=1000,
+        fee_rate=0.001, slippage_rate=0.0005,
+        entry_threshold=0.99, exit_threshold=0.99,
+        reinvestment=True,
+    )
+    frame = prediction_frame(40)
+    simulation = simulate_portfolio(frame, request, default_parameters())
+    first_close = float(frame.iloc[0]["close"])
+    last_close = float(frame.iloc[-1]["close"])
+    bought_quantity = 1000 * (1 - 0.001) / (first_close * (1 + 0.0005))
+    expected_final = bought_quantity * last_close * (1 - 0.0005) * (1 - 0.001)
+    assert simulation["equity_curve"][-1]["buy_hold"] == pytest.approx(expected_final)
+    assert simulation["trades"] == []
+    assert simulation["signal_diagnostics"]["entry_probability_above_threshold"] == 0
+    assert simulation["signal_diagnostics"]["entry_probability_max"] == pytest.approx(0.8)
+    frame = frame.assign(
+        entry_baseline_probability=0.5, exit_baseline_probability=0.5,
+    )
+    result = calculate_results(
+        frame, request, simulation, {"fold_count": 1, "feature_importance": []},
+        default_parameters(),
+    )
+    assert result["summary"]["has_executed_trades"] is False
+    assert result["insights"]["no_trade_reason"] == "ENTRY_PROBABILITY_BELOW_THRESHOLD"
+    assert result["insights"]["benchmark_costs_included"] is True
+    assert result["models"]["entry"]["baseline_brier_score"] is not None
+    assert result["models"]["entry"]["brier_skill_score"] is not None
+    assert result["comparisons"][1]["capital_final"] == pytest.approx(expected_final, abs=1e-3)
