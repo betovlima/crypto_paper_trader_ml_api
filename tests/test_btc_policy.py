@@ -98,5 +98,5 @@ def test_prohibit_unsupported_fee_and_unavailable_next_bar():
     # A 30-minute missing bar blocks the signal instead of executing it stale.
     candles[1]["timestamp"] += timedelta(minutes=30)
     candles[2]["timestamp"] += timedelta(minutes=30)
-    out = simulate_rotations(candles, {1: _signal(1), 2: _signal(2)}, DEFAULT_POLICY)
+    out = simulate_rotations(candles, {1: _signal(1), 2: _signal(2, probability=.3)}, DEFAULT_POLICY)
     assert out["switch_count"] == 0
