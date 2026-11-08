@@ -12,6 +12,8 @@ from .schemas import (
     HealthResponse,
     BTCCapitalizationRequest,
     MLBacktestCreate,
+    MLResearchStrategyCreate,
+    MLStrategyTuneRequest,
     MLBacktestJobDetail,
     MLBacktestJobResponse,
     PublicMLConfigurationResponse,
@@ -19,6 +21,10 @@ from .schemas import (
     RuntimeParametersUpdateRequest,
 )
 from .service import cancel_job, capitalize_replay_job, create_job, create_replay_job, get_audit_zip, get_job, list_jobs
+from .strategy_research import (
+    create_strategy, get_strategy, list_strategies, start_optimization,
+    execute_strategy, export_strategy_report,
+)
 from .settings_service import (
     ParameterValidationError,
     get_runtime_parameters,
@@ -41,7 +47,7 @@ app = FastAPI(
     title="Crypto Paper Trader ML API",
     version=__version__,
     description=(
-        "Independent XGBoost walk-forward backtest service for Crypto Paper Trader. "
+        "Independent LightGBM walk-forward backtest service for Crypto Paper Trader. "
         "All runtime, model, market, feature and simulation parameters are stored in its database."
     ),
     lifespan=lifespan,
@@ -81,6 +87,59 @@ def update_ml_settings(request: RuntimeParametersUpdateRequest) -> dict:
     except ParameterValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"source": "DATABASE", "parameters": rows}
+
+
+@app.get("/v1/ml-strategies")
+def ml_strategies() -> list[dict]:
+    return list_strategies()
+
+
+@app.post("/v1/ml-strategies", status_code=201)
+def ml_create_strategy(payload: MLResearchStrategyCreate) -> dict:
+    try:
+        return create_strategy(**payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/v1/ml-strategies/{strategy_id}")
+def ml_strategy_detail(strategy_id: str) -> dict:
+    try:
+        return get_strategy(strategy_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/v1/ml-strategies/{strategy_id}/optimize", status_code=202)
+def ml_optimize_strategy(strategy_id: str, payload: MLStrategyTuneRequest) -> dict:
+    try:
+        return start_optimization(strategy_id, **payload.model_dump())
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/v1/ml-strategies/{strategy_id}/execute", status_code=202)
+def ml_execute_strategy(strategy_id: str) -> dict:
+    try:
+        return execute_strategy(strategy_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/v1/ml-strategies/{strategy_id}/report.zip")
+def ml_strategy_report(strategy_id: str) -> Response:
+    try:
+        payload = export_strategy_report(strategy_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return Response(
+        content=payload, media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="btc-strategy-{strategy_id}.zip"'},
+    )
 
 
 @app.post("/v1/ml-backtests", response_model=MLBacktestJobResponse, status_code=202)
