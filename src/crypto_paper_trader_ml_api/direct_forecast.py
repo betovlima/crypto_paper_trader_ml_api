@@ -15,7 +15,8 @@ from sklearn.metrics import (
     average_precision_score, brier_score_loss, log_loss, mean_absolute_error,
     mean_squared_error, roc_auc_score,
 )
-from xgboost import XGBRegressor
+from lightgbm import LGBMRegressor
+from .lightgbm_models import fit_regressor
 
 from . import __version__
 from .binance_archive import BinancePublicArchiveClient
@@ -65,40 +66,9 @@ def create_direction_labels(
 def _regressor(
     training: pd.DataFrame, validation: pd.DataFrame,
     columns: list[str], parameters: RuntimeParameters,
-) -> XGBRegressor | None:
-    """Fit in scaled target units; probabilities and reported returns stay unscaled."""
-    scale = parameters.floating("forecast.regression_target_scale")
-    outcomes = training["forecast_realized_return"].to_numpy(float) * scale
-    if np.ptp(outcomes) < 1e-8:
-        return None
-    model = XGBRegressor(
-        objective="reg:squarederror",
-        eval_metric="rmse",
-        tree_method=parameters.string("xgboost.tree_method"),
-        n_estimators=parameters.integer("forecast.regression_n_estimators"),
-        max_depth=parameters.integer("forecast.regression_max_depth"),
-        learning_rate=parameters.floating("forecast.regression_learning_rate"),
-        min_child_weight=parameters.floating("forecast.regression_min_child_weight"),
-        subsample=parameters.floating("xgboost.subsample"),
-        colsample_bytree=parameters.floating("xgboost.colsample_bytree"),
-        gamma=parameters.floating("forecast.regression_gamma"),
-        reg_alpha=parameters.floating("forecast.regression_reg_alpha"),
-        reg_lambda=parameters.floating("forecast.regression_reg_lambda"),
-        random_state=parameters.integer("xgboost.random_state"),
-        n_jobs=parameters.integer("xgboost.n_jobs"),
-        early_stopping_rounds=parameters.integer(
-            "forecast.regression_early_stopping_rounds"
-        ),
-    )
-    model.fit(
-        training[columns], outcomes,
-        eval_set=[(
-            validation[columns],
-            validation["forecast_realized_return"].to_numpy(float) * scale,
-        )],
-        verbose=False,
-    )
-    return model
+) -> LGBMRegressor | None:
+    """LightGBM numerical return fit with separate, purged validation data."""
+    return fit_regressor(training, validation, columns, parameters)
 
 
 def _metrics(rows: pd.DataFrame) -> dict:
@@ -252,7 +222,7 @@ def walk_forward_direction(
             trained_classifiers += 1
 
         calibrator = ProbabilityCalibrator(
-            solver=parameters.string("xgboost.calibration_solver")
+            solver=parameters.string("lightgbm.calibration_solver")
         )
         calibrator.fit(raw_calibration, calibration["forecast_realized_up"].to_numpy(int))
 
@@ -436,7 +406,7 @@ def run_direction_backtest(
                 "confidence_intervals": temporal_block_confidence_intervals(
                     predicted, horizon_candles=details["horizon_candles"],
                     samples=parameters.integer("forecast.bootstrap_samples"),
-                    random_state=parameters.integer("xgboost.random_state"),
+                    random_state=parameters.integer("lightgbm.random_state"),
                 ),
                 "folds": [
                     {
@@ -501,7 +471,7 @@ def run_direction_backtest(
                     "forecast.regression_target_scale"
                 ),
                 "bootstrap": "Moving-block 95% CI per horizon, stratified by OOS fold",
-                "model_diagnostics": "Raw and calibrated probability bins, best XGBoost tree iterations, actual split nodes and prediction dispersion per fold",
+                "model_diagnostics": "Raw and calibrated probability bins, best LightGBM boosting iterations, actual split nodes and prediction dispersion per fold",
             },
         }
         if audit_writer is not None:
