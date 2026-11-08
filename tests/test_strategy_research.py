@@ -98,6 +98,18 @@ def test_entry_diagnostics_identifies_probability_and_edge_bottlenecks():
     assert result["passes_expected_return"] == 1
     assert result["passes_all_entry_filters"] == 1
     assert .005 < result["required_entry_return"] < .006
+    assert result["diagnosis"] == "HAS_ENTRY_OPPORTUNITIES"
+    assert result["max_predicted_return"] == .007
+    assert .5 < result["p90_probability"] < .65
+    blocked = strategy_research._entry_diagnostics(
+        signals, {**policy, "policy.entry_edge": .03}, .001, .0005
+    )
+    assert blocked["passes_expected_return"] == 0
+    assert blocked["diagnosis"] == "RETURN_FILTER_BLOCKED"
+    assert blocked["max_predicted_return"] < blocked["required_entry_return"]
+    assert strategy_research._entry_diagnostics(
+        {}, policy, .001, .0005
+    )["diagnosis"] == "NO_ALIGNED_SIGNALS"
 
 
 def test_first_candidate_explores_possible_entries_before_random_search():
@@ -146,6 +158,8 @@ def test_all_cash_campaign_reports_no_trades_and_does_not_select_a_champion(monk
         assert result["champion"] is None
         assert result["execution_job_id"] is None
         assert result["summary"]["inactive_trials"] == 4
+        assert result["summary"]["reason_code"] == "RETURN_FILTER_BLOCKED"
+        assert len(result["summary"]["diagnostics_by_trial"]) == 4
         assert all(item["status"] == "NO_TRADES" for item in result["trials"])
         assert all(item["metrics"]["entry_diagnostics"]["total_aligned_signals"] > 0 for item in result["trials"])
         with pytest.raises(ValueError, match="Primeiro conclua"):
