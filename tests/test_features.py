@@ -87,12 +87,35 @@ def test_future_label_availability_is_recorded_for_fold_purging():
         decision_timeframe="30min",
     )
     labelled = create_labels(featured, params)
-    assert labelled["label_available_at"].iloc[0] == pd.Timestamp(
-        "2024-01-01T02:30:00Z"
+    # The first rows do not have enough observations to compute ATR.
+    # Invalid labels must NOT be assigned a future availability timestamp.
+    assert pd.isna(featured["atr_14"].iloc[0])
+    assert pd.isna(labelled["entry_label"].iloc[0])
+    assert pd.isna(labelled["label_available_at"].iloc[0])
+
+    valid_indexes = labelled.index[labelled["entry_label"].notna()]
+    assert len(valid_indexes) > 0
+    first_valid = int(valid_indexes[0])
+    horizon = params.integer("labels.horizon_candles")
+
+    # For every usable label, availability comes from the close of its
+    # last future candle; it is not the current candle's timestamp.
+    for index in valid_indexes:
+        assert labelled.loc[index, "label_available_at"] == (
+            featured.loc[index + horizon, "decision_available_at"]
+        )
+        assert labelled.loc[index, "label_available_at"] > (
+            featured.loc[index, "decision_available_at"]
+        )
+    assert labelled.loc[first_valid, "label_available_at"] == (
+        pd.Timestamp("2024-01-01T00:00:00Z")
+        + pd.Timedelta(minutes=30 * (first_valid + horizon + 1))
     )
-    assert pd.isna(labelled["label_available_at"].iloc[-1])
-    assert pd.isna(labelled["entry_label"].iloc[-1])
-    assert pd.notna(labelled["entry_label"].iloc[-5])
+
+    # The final four candles have no complete 4-candle lookahead.
+    assert labelled["label_available_at"].tail(horizon).isna().all()
+    assert labelled["entry_label"].tail(horizon).isna().all()
+    assert pd.notna(labelled["entry_label"].iloc[-horizon - 1])
 
 
 def test_market_halt_resets_indicators_and_disallows_labels_crossing_the_gap():
