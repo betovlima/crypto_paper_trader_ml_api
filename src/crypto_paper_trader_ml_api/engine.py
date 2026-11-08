@@ -23,20 +23,75 @@ from .settings_service import RuntimeParameters
 
 @dataclass
 class ProbabilityCalibrator:
+    """Calibrate each forecast horizon on its OWN chronology before OOS.
+
+    Raw, Platt-on-probabilities and Platt-on-log-odds are evaluated on a
+    held-out tail of the calibration partition. Only that partition's labels
+    choose the method; the selection/test partition is never consulted.
+    """
     solver: str
     model: LogisticRegression | None = None
+    method: str = "identity"
+    selection_brier: float | None = None
+    selection_rows: int = 0
+    calibration_rows: int = 0
+
+    @staticmethod
+    def _features(probabilities: np.ndarray, method: str) -> np.ndarray:
+        raw = np.clip(np.asarray(probabilities, dtype=float), 1e-6, 1 - 1e-6)
+        if method == "logistic_logit":
+            raw = np.log(raw / (1.0 - raw))
+        return raw.reshape(-1, 1)
 
     def fit(self, raw_probabilities: np.ndarray, labels: np.ndarray) -> None:
-        if len(np.unique(labels)) < 2:
+        from sklearn.metrics import brier_score_loss
+        raw = np.clip(np.asarray(raw_probabilities, dtype=float), 1e-6, 1 - 1e-6)
+        targets = np.asarray(labels, dtype=int)
+        if len(raw) != len(targets):
+            raise ValueError("Calibration predictions/labels length mismatch")
+        self.model = None
+        self.method = "identity"
+        self.selection_brier = None
+        self.selection_rows = 0
+        self.calibration_rows = len(targets)
+        if len(raw) < 100 or np.unique(targets).size < 2:
             return
-        model = LogisticRegression(solver=self.solver)
-        model.fit(raw_probabilities.reshape(-1, 1), labels)
-        self.model = model
+        # Chronological selection: no randomized split or scoring-window labels.
+        split = int(len(targets) * 0.75)
+        fit_labels = targets[:split]
+        holdout = targets[split:]
+        if np.unique(fit_labels).size < 2 or len(holdout) < 25:
+            return
+        best_method = "identity"
+        best_brier = float(brier_score_loss(holdout, raw[split:]))
+        self.selection_rows = len(holdout)
+        self.selection_brier = best_brier
+        for candidate in ("logistic_raw", "logistic_logit"):
+            try:
+                trial = LogisticRegression(solver=self.solver, max_iter=500)
+                trial.fit(self._features(raw[:split], candidate), fit_labels)
+                values = trial.predict_proba(self._features(raw[split:], candidate))[:, 1]
+                trial_brier = float(brier_score_loss(holdout, values))
+                # A small minimum improvement discourages selection on noise.
+                if trial_brier < best_brier - 1e-4:
+                    best_brier, best_method = trial_brier, candidate
+            except (ValueError, FloatingPointError):
+                continue
+        self.method = best_method
+        self.selection_brier = best_brier
+        if best_method != "identity":
+            model = LogisticRegression(solver=self.solver, max_iter=500)
+            model.fit(self._features(raw, best_method), targets)
+            self.model = model
 
     def transform(self, raw_probabilities: np.ndarray) -> np.ndarray:
+        raw = np.clip(np.asarray(raw_probabilities, dtype=float), 1e-6, 1 - 1e-6)
         if self.model is None:
-            return raw_probabilities
-        return self.model.predict_proba(raw_probabilities.reshape(-1, 1))[:, 1]
+            return raw
+        return np.clip(
+            self.model.predict_proba(self._features(raw, self.method))[:, 1],
+            1e-6, 1 - 1e-6,
+        )
 
 
 def _constant_probability(labels: np.ndarray, size: int) -> np.ndarray:
