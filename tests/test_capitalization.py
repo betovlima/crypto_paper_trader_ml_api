@@ -94,7 +94,7 @@ def test_no_trade_equity_and_costs_are_finite():
     result = _summary_series(
         candles, {}, start=1, end=4, capital=10000, fee=0.001,
         slippage=0.0005, edge=0, min_probability=0.5,
-        exit_return=0, baseline=False, label="V1",
+        exit_return=0, baseline=False, label="V1", bar_seconds=1800,
     )
     assert result["capital_final"] == pytest.approx(10000)
     assert result["switch_count"] == 0
