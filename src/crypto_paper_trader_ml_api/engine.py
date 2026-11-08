@@ -722,10 +722,9 @@ def run_ml_backtest(
         metadata["market_interruptions"] = getattr(client, "market_interruptions", {})
         documented_halt_candles = sum(
             int(event["missing_candles"])
-            for events in metadata["market_interruptions"].values()
-            for event in events
-            if request.decision_timeframe in metadata["market_interruptions"]
-            and events is metadata["market_interruptions"][request.decision_timeframe]
+            for event in metadata["market_interruptions"].get(
+                request.decision_timeframe, []
+            )
         )
         coverage_status = (
             "FULL"
