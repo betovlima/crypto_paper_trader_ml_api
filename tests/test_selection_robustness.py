@@ -202,3 +202,42 @@ def test_stress_without_frozen_schedule_cannot_pass_robustness_gate():
     assert not outcome["passed"]
     assert "SAME_TRADES_UNDER_STRESS" in outcome["reason_codes"]
 
+
+
+def test_full_frozen_audit_replays_more_than_default_200_trades():
+    candles = _candles([(100, 100)] * 570)
+    signals = {
+        i: _signal(i, value=.025 if i % 2 else -.02,
+                   probability=.8 if i % 2 else .1)
+        for i in range(1, len(candles))
+    }
+    policy = {
+        **DEFAULT_POLICY, "policy.fee_model": ALPACA_FEE_MODEL,
+        "policy.entry_edge": 0, "policy.min_hold_bars": 0,
+        "policy.cooldown_bars": 0, "policy.take_profit": .5,
+        "policy.stop_loss": .3, "policy.trailing_stop": .3,
+    }
+    baseline = simulate_rotations(
+        candles, signals, policy, slippage=.0005,
+        audit_limit=2 * len(candles),
+    )
+    assert baseline["switch_count"] > 200
+    assert not baseline["actions_truncated"]
+    exact_reprice = replay_frozen_rotations(
+        candles, signals, baseline["actions"], policy,
+        slippage=.0005, fee_multiplier=1,
+    )
+    stressed = replay_frozen_rotations(
+        candles, signals, baseline["actions"], policy,
+        slippage=.001, fee_multiplier=1.25,
+    )
+    assert exact_reprice["capital_final"] == pytest.approx(
+        baseline["capital_final"], rel=1e-9
+    )
+    assert exact_reprice["completed_cycles"] == baseline["completed_cycles"]
+    assert stressed["switch_count"] == baseline["switch_count"]
+    assert stressed["completed_cycles"] == baseline["completed_cycles"]
+    assert stressed["capital_final"] < baseline["capital_final"]
+    assert stressed["same_trade_schedule"]
+
+
