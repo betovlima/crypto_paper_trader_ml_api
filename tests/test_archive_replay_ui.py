@@ -7,7 +7,6 @@ import json
 from uuid import uuid4
 from zipfile import ZipFile
 
-import numpy as np
 import pandas as pd
 import pytest
 
