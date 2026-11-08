@@ -84,7 +84,9 @@ def test_replay_uses_only_original_csv_market_and_keeps_fold_settings(tmp_path, 
     assert runtime.integer("forecast.maximum_folds") == 2
     assert runtime.floating("forecast.regression_target_scale") > 1
     assert client.archive_manifest["30min"][0]["sha256"] == "archived"
-    pd.testing.assert_frame_equal(
+    # Both operands are pandas Series, not DataFrames. Compare the exact
+    # chronological timestamp values, including their timezone and dtype.
+    pd.testing.assert_series_equal(
         pd.to_datetime(candles["timestamp"], utc=True),
         pd.to_datetime(raw["timestamp"], utc=True),
         check_names=False,
