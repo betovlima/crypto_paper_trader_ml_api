@@ -221,3 +221,59 @@ def test_incomplete_and_unknown_runs_cannot_be_exported():
         assert missing.status_code == 404
     finally:
         _delete_job(job_id)
+
+
+def test_worker_persists_audit_at_the_same_time_as_finished_results(monkeypatch):
+    """No successful job should be marked complete without its full ZIP."""
+    from crypto_paper_trader_ml_api import service
+
+    content, _ = _archive()
+    job_id = _persist_job(status="QUEUED")
+    with SessionLocal.begin() as session:
+        job = session.get(MLBacktestJob, job_id)
+        job.request_json = _request().model_dump_json()
+        job.settings_snapshot_json = json.dumps(_parameters().snapshot())
+
+    def fake_backtest(request, parameters, progress, cancelled, audit_writer=None):
+        assert audit_writer is not None
+        assert request.symbol == "BTCUSDT"
+        audit_writer(content)
+        return {"summary": {"capital_final": 1234.0}}
+
+    monkeypatch.setattr(service, "run_ml_backtest", fake_backtest)
+    try:
+        service._run_job(job_id)
+        with SessionLocal() as session:
+            job = session.get(MLBacktestJob, job_id)
+            saved = session.get(MLBacktestAudit, job_id)
+            assert job.status == "COMPLETED"
+            assert saved is not None
+            assert saved.archive_zip == content
+            assert json.loads(job.result_json)["summary"]["capital_final"] == 1234.0
+    finally:
+        _delete_job(job_id)
+
+
+def test_worker_rejects_completed_status_if_audit_is_missing(monkeypatch):
+    from crypto_paper_trader_ml_api import service
+
+    job_id = _persist_job(status="QUEUED")
+    with SessionLocal.begin() as session:
+        job = session.get(MLBacktestJob, job_id)
+        job.request_json = _request().model_dump_json()
+        job.settings_snapshot_json = json.dumps(_parameters().snapshot())
+
+    def missing_audit(request, parameters, progress, cancelled, audit_writer=None):
+        return {"summary": {"capital_final": 1000.0}}
+
+    monkeypatch.setattr(service, "run_ml_backtest", missing_audit)
+    try:
+        service._run_job(job_id)
+        with SessionLocal() as session:
+            job = session.get(MLBacktestJob, job_id)
+            assert job.status == "FAILED"
+            assert job.result_json is None
+            assert session.get(MLBacktestAudit, job_id) is None
+            assert "No complete audit archive" in job.error_message
+    finally:
+        _delete_job(job_id)
