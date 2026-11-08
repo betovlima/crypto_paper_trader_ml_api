@@ -94,7 +94,7 @@ def test_calibration_diagnostics_preserve_raw_and_platt_test_probabilities():
         raw_test=raw_test, calibrated_test=fitted, test_labels=observed,
         baseline_probability=0.5, calibrator=calibrator,
     )
-    assert result["method"] == "logistic_platt"
+    assert result["method"] == "identity"  # tiny calibration samples must not be overfit
     assert result["test_raw_unique"] == 4
     assert result["test_calibrated_unique"] == 4
     assert result["calibration_coefficient"] is not None
