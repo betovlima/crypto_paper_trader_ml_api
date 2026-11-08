@@ -163,6 +163,161 @@ def synchronize_parameter_catalog() -> None:
                 "display_order": 113,
             },
         ]
+        # Regression parameters are independent from classification. Numerical
+        # scales are expressed in the regressor's scaled target units.
+        regression_defaults = [
+          {
+            "key": "forecast.regression_target_scale",
+            "category": "BTC Forecast",
+            "label": "Regressor target scale (basis points)",
+            "description": "Editable forecast research parameter stored in the runtime database.",
+            "value_type": "float",
+            "value": 10000,
+            "constraints": {
+              "minimum": 1,
+              "maximum": 100000
+            },
+            "public": True,
+            "requires_restart": False,
+            "display_order": 114
+          },
+          {
+            "key": "forecast.regression_n_estimators",
+            "category": "BTC Forecast",
+            "label": "Regressor maximum XGBoost trees",
+            "description": "Editable forecast research parameter stored in the runtime database.",
+            "value_type": "integer",
+            "value": 350,
+            "constraints": {
+              "minimum": 20,
+              "maximum": 2000
+            },
+            "public": True,
+            "requires_restart": False,
+            "display_order": 115
+          },
+          {
+            "key": "forecast.regression_max_depth",
+            "category": "BTC Forecast",
+            "label": "Regressor maximum tree depth",
+            "description": "Editable forecast research parameter stored in the runtime database.",
+            "value_type": "integer",
+            "value": 4,
+            "constraints": {
+              "minimum": 1,
+              "maximum": 12
+            },
+            "public": True,
+            "requires_restart": False,
+            "display_order": 116
+          },
+          {
+            "key": "forecast.regression_learning_rate",
+            "category": "BTC Forecast",
+            "label": "Regressor learning rate",
+            "description": "Editable forecast research parameter stored in the runtime database.",
+            "value_type": "float",
+            "value": 0.04,
+            "constraints": {
+              "minimum": 0.001,
+              "maximum": 0.5
+            },
+            "public": True,
+            "requires_restart": False,
+            "display_order": 117
+          },
+          {
+            "key": "forecast.regression_min_child_weight",
+            "category": "BTC Forecast",
+            "label": "Regressor minimum child weight",
+            "description": "Editable forecast research parameter stored in the runtime database.",
+            "value_type": "float",
+            "value": 4,
+            "constraints": {
+              "minimum": 0,
+              "maximum": 200
+            },
+            "public": True,
+            "requires_restart": False,
+            "display_order": 118
+          },
+          {
+            "key": "forecast.regression_gamma",
+            "category": "BTC Forecast",
+            "label": "Regressor split penalty (in scaled target units)",
+            "description": "Editable forecast research parameter stored in the runtime database.",
+            "value_type": "float",
+            "value": 0,
+            "constraints": {
+              "minimum": 0,
+              "maximum": 1000
+            },
+            "public": True,
+            "requires_restart": False,
+            "display_order": 119
+          },
+          {
+            "key": "forecast.regression_reg_alpha",
+            "category": "BTC Forecast",
+            "label": "Regressor L1 regularization (in scaled target units)",
+            "description": "Editable forecast research parameter stored in the runtime database.",
+            "value_type": "float",
+            "value": 0,
+            "constraints": {
+              "minimum": 0,
+              "maximum": 1000
+            },
+            "public": True,
+            "requires_restart": False,
+            "display_order": 120
+          },
+          {
+            "key": "forecast.regression_reg_lambda",
+            "category": "BTC Forecast",
+            "label": "Regressor L2 regularization",
+            "description": "Editable forecast research parameter stored in the runtime database.",
+            "value_type": "float",
+            "value": 1.5,
+            "constraints": {
+              "minimum": 0,
+              "maximum": 1000
+            },
+            "public": True,
+            "requires_restart": False,
+            "display_order": 121
+          },
+          {
+            "key": "forecast.regression_early_stopping_rounds",
+            "category": "BTC Forecast",
+            "label": "Regressor early stopping patience",
+            "description": "Editable forecast research parameter stored in the runtime database.",
+            "value_type": "integer",
+            "value": 30,
+            "constraints": {
+              "minimum": 2,
+              "maximum": 300
+            },
+            "public": True,
+            "requires_restart": False,
+            "display_order": 122
+          },
+          {
+            "key": "forecast.bootstrap_samples",
+            "category": "BTC Forecast",
+            "label": "Temporal bootstrap samples",
+            "description": "Editable forecast research parameter stored in the runtime database.",
+            "value_type": "integer",
+            "value": 200,
+            "constraints": {
+              "minimum": 50,
+              "maximum": 1000
+            },
+            "public": True,
+            "requires_restart": False,
+            "display_order": 123
+          }
+        ]
+        forecast_defaults.extend(regression_defaults)
         for item in forecast_defaults:
             if item["key"] not in existing_keys:
                 session.add(MLRuntimeParameter(
@@ -373,6 +528,17 @@ def _validate_cross_parameter_values(values: dict[str, Any]) -> None:
         raise ParameterValidationError("Forecast horizons must be unique and between 1 and 72 hours")
     if not 2 <= int(values.get("forecast.maximum_folds", 3)) <= 6:
         raise ParameterValidationError("Forecast maximum folds must be between 2 and 6")
+
+    scale = float(values.get("forecast.regression_target_scale", 10000.0))
+    if not 1 <= scale <= 100000:
+        raise ParameterValidationError("Regressor target scale must be between 1 and 100000")
+    samples = int(values.get("forecast.bootstrap_samples", 200))
+    if not 50 <= samples <= 1000:
+        raise ParameterValidationError("Bootstrap samples must be between 50 and 1000")
+    regression_trees = int(values.get("forecast.regression_n_estimators", 350))
+    patience = int(values.get("forecast.regression_early_stopping_rounds", 30))
+    if patience >= regression_trees:
+        raise ParameterValidationError("Regressor early stopping must be shorter than max trees")
 
     if values.get("backtest.default_history_source", "MEXC") not in {
         "MEXC", "BINANCE_SPOT_ARCHIVE",
