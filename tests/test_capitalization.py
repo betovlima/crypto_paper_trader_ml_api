@@ -68,7 +68,7 @@ def test_replay_rejects_changed_market_candles():
 
 
 def test_gap_never_receives_synthetic_or_stale_execution():
-    source = _three_forecasts(0.01)
+    source = _make_archive(predicted=0.01)
     with ZipFile(BytesIO(source)) as z:
         import csv
         from io import TextIOWrapper
@@ -81,9 +81,8 @@ def test_gap_never_receives_synthetic_or_stale_execution():
         {"timestamp": _utc(row["timestamp"]), "open": float(row["open"]), "close": float(row["close"])}
         for row in rows
     ]
-    signals = _signals(source, 2, candles, 1800)
-    assert 1 not in signals
-    assert 2 in signals  # 00:30 signal becomes invalid because its candle is absent? see below
+    with pytest.raises(ValueError, match="Não há sinais executáveis"):
+        _signals(source, 2, candles, 1800)
 
 
 def test_no_trade_equity_and_costs_are_finite():
