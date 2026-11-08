@@ -234,7 +234,7 @@ def walk_forward_predict(
         reverse=True,
     )[: parameters.integer("walk_forward.feature_importance_limit")]
     return out_of_sample.reset_index(drop=True), {
-        "fold_count": int(out_of_sample["walk_forward_fold"].max()),
+        "fold_count": len(fold_windows),
         "fold_windows": fold_windows,
         "label_horizon_candles": purge_candles,
         "feature_importance": feature_importance,
