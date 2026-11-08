@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from crypto_paper_trader_ml_api.capitalization import (
-    _signals, _summary_series, compare_capitalization,
+    _joint_signals, _signals, _summary_series, compare_capitalization,
 )
 from .test_archive_replay_ui import _make_archive
 
@@ -31,6 +31,79 @@ def _three_forecasts(predicted: float) -> bytes:
         for name, blob in parts.items():
             output.writestr(name, blob)
     return target.getvalue()
+
+
+def _all_horizon_forecasts(predicted: float) -> bytes:
+    """Create three simultaneous OOS forecast targets on the same candles."""
+    from json import dumps, loads
+    source = _three_forecasts(predicted)
+    with ZipFile(BytesIO(source)) as archive:
+        parts = {name: archive.read(name) for name in archive.namelist()}
+    base = pd.read_csv(BytesIO(parts["forecast_predictions_oos.csv"]))
+    joined = []
+    for horizon in (2, 6, 24):
+        frame = base.copy()
+        frame["forecast_horizon_hours"] = horizon
+        frame["forecast_future_at_utc"] = (
+            pd.to_datetime(frame["timestamp"], utc=True)
+            + pd.Timedelta(hours=horizon, minutes=30)
+        )
+        joined.append(frame)
+    parts["forecast_predictions_oos.csv"] = pd.concat(
+        joined, ignore_index=True
+    ).to_csv(index=False).encode()
+    folds = loads(parts["folds.json"])
+    parts["folds.json"] = dumps([
+        {**folds[0], "horizon_hours": horizon}
+        for horizon in (2, 6, 24)
+    ]).encode()
+    metrics = loads(parts["forecast_metrics.json"])
+    parts["forecast_metrics.json"] = dumps([
+        {**metrics[0], "horizon_hours": horizon,
+         "metrics": {**metrics[0]["metrics"], "rows": 3}}
+        for horizon in (2, 6, 24)
+    ]).encode()
+    output = BytesIO()
+    with ZipFile(output, "w", compression=ZIP_DEFLATED) as zipped:
+        for name, blob in parts.items():
+            zipped.writestr(name, blob)
+    return output.getvalue()
+
+
+def test_joint_signal_requires_two_positive_horizons_and_same_timestamp():
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    signal_at = start.isoformat()
+    signals = {
+        2: {1: {"predicted_return": 0.01, "p_up": 0.8, "signal_at": signal_at},
+            2: {"predicted_return": 0.01, "p_up": 0.8, "signal_at": signal_at}},
+        6: {1: {"predicted_return": 0.01, "p_up": 0.8, "signal_at": signal_at},
+            2: {"predicted_return": -0.01, "p_up": 0.4, "signal_at": signal_at}},
+        24: {1: {"predicted_return": -0.02, "p_up": 0.4, "signal_at": signal_at},
+             2: {"predicted_return": -0.02, "p_up": 0.4, "signal_at": signal_at}},
+    }
+    combined = _joint_signals(signals)
+    assert combined[1]["positive_votes"] == 2
+    assert combined[2]["positive_votes"] == 1
+    assert combined[1]["horizons_hours"] == [2, 6, 24]
+    assert combined[1]["p_up"] == pytest.approx(2 / 3)
+
+
+def test_joint_capitalization_is_one_portfolio_not_mean_of_three():
+    report = compare_capitalization(
+        _all_horizon_forecasts(0.0001), _all_horizon_forecasts(0.01),
+        **{**_options(), "horizon": 0},
+    )
+    assert report["status"] == "VERIFIED"
+    assert report["horizon_hours"] == 0
+    assert report["horizons_hours"] == [2, 6, 24]
+    assert report["signal_count"] == 3
+    assert "2 of 3" in report["policy"]
+    original, candidate, buy_hold = report["results"]
+    assert original["capital_final"] == 10000
+    assert original["switch_count"] == 0
+    assert candidate["switch_count"] == 2
+    assert buy_hold["switch_count"] == 2
+
 
 
 def _options() -> dict:
