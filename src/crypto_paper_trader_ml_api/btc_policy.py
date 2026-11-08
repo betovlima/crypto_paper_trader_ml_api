@@ -13,8 +13,8 @@ import math
 HORIZONS = (2, 6, 24)
 DEFAULT_POLICY = {
     "policy.enabled": True,
-    "policy.entry_probability": 0.56,
-    "policy.exit_probability": 0.46,
+    "policy.entry_probability": 0.44,
+    "policy.exit_probability": 0.32,
     "policy.entry_edge": 0.002,
     "policy.exit_return": -0.001,
     "policy.min_positive_votes": 2,
@@ -32,8 +32,8 @@ DEFAULT_POLICY = {
 def validate_policy(values: dict) -> dict:
     policy = {**DEFAULT_POLICY, **{k: v for k, v in values.items() if k in DEFAULT_POLICY}}
     bounds = {
-        "policy.entry_probability": (0.5, 0.85),
-        "policy.exit_probability": (0.2, 0.65),
+        "policy.entry_probability": (0.25, 0.85),
+        "policy.exit_probability": (0.10, 0.65),
         "policy.entry_edge": (0.0, 0.06),
         "policy.exit_return": (-0.06, 0.02),
         "policy.min_positive_votes": (1, 3),
@@ -84,11 +84,16 @@ def aggregate_signals(by_horizon: dict[int, dict], policy: dict) -> dict:
             weight * item["predicted_return"] * (6.0 / h)
             for weight, h, item in zip(weights, HORIZONS, entries, strict=True)
         ) / normalizer
-        votes = sum(item["p_up"] >= .5 and item["predicted_return"] > 0 for item in entries)
+        # A 50% gate previously blocked all votes when calibrated base
+        # rates were below 50%, regardless of positive predicted return.
+        # Votes use return signs; probabilities have a separate tuned gate.
+        votes = sum(item["predicted_return"] > 0 for item in entries)
+        probability_votes = sum(item["p_up"] >= .5 for item in entries)
         joined[index] = {
             "predicted_return": float(joint_return),
             "p_up": float(joint_p),
             "positive_votes": int(votes),
+            "probability_votes": int(probability_votes),
             "signal_at": entries[0]["signal_at"],
         }
     return joined
