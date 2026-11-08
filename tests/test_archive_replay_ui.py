@@ -125,7 +125,6 @@ def test_ui_replay_creates_db_job_from_original_snapshot_and_persists_comparison
     original_id = str(uuid4())
     old_archive = _make_archive(predicted=0.005)
     old_request, old_params = inspect_source_archive(old_archive)
-    old_params["xgboost.gamma"] = 0.1234
     class RecordedExecutor:
         pending = []
 
