@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from uuid import uuid4
+from io import BytesIO
+from zipfile import ZipFile
 
 import numpy as np
 import pandas as pd
@@ -54,6 +56,107 @@ def _cleanup(source_id: str):
             session.query(MLBacktestJob).filter(MLBacktestJob.id == child).delete()
         session.query(MLBacktestAudit).filter(MLBacktestAudit.job_id == source_id).delete()
         session.query(MLBacktestJob).filter(MLBacktestJob.id == source_id).delete()
+
+
+def _give_source_three_horizons(source_id: str) -> None:
+    """Existing archived 30-minute candles, with a complete 2h/6h/24h fold manifest."""
+    with SessionLocal() as session:
+        original = session.get(MLBacktestAudit, source_id).archive_zip
+    with ZipFile(BytesIO(original), "r") as archive:
+        base_folds = json.loads(archive.read("folds.json"))
+        merged = [
+            {**base_folds[0], "horizon_hours": horizon}
+            for horizon in (2, 6, 24)
+        ]
+        new_blob = BytesIO()
+        with ZipFile(new_blob, "w") as out:
+            for name in archive.namelist():
+                out.writestr(
+                    name,
+                    json.dumps(merged).encode() if name == "folds.json"
+                    else archive.read(name),
+                )
+    with SessionLocal.begin() as session:
+        session.get(MLBacktestAudit, source_id).archive_zip = new_blob.getvalue()
+
+
+def test_new_strategy_uses_all_horizons_and_rejects_incomplete_archive():
+    source = _insert_source()
+    try:
+        with pytest.raises(ValueError, match="folds OOS"):
+            strategy_research.create_strategy(
+                name="Todos os horizontes", source_job_id=source
+            )
+        _give_source_three_horizons(source)
+        row = strategy_research.create_strategy(
+            name="Todos os horizontes", source_job_id=source
+        )
+        assert row["horizon_hours"] == 0
+        assert row["horizons_hours"] == [2, 6, 24]
+    finally:
+        _cleanup(source)
+
+
+def test_one_optimization_campaign_evaluates_all_horizons_without_oos_leakage(monkeypatch):
+    source = _insert_source()
+    _give_source_three_horizons(source)
+    seen = []
+    try:
+        strategy = strategy_research.create_strategy(
+            name="Otimização conjunta", source_job_id=source,
+        )
+        strategy_id = strategy["id"]
+        with SessionLocal.begin() as session:
+            row = session.get(MLResearchStrategy, strategy_id)
+            row.status = "RUNNING"
+            row.mode = "QUICK"
+            row.trials_target = 4
+        test_start = pd.Timestamp("2024-02-01T00:00:00Z")
+        dataset = pd.DataFrame({
+            "timestamp": pd.date_range("2024-01-01", periods=6, freq="30min", tz="UTC"),
+        })
+
+        def fake_prepare(_archive, horizon, _parameters, cutoff):
+            assert cutoff == test_start
+            seen.append(("prepare", horizon))
+            return dataset, dataset, dataset, dataset, ["signal"], horizon, cutoff
+
+        def fake_score(prepared, candidate, parameters):
+            horizon = prepared[5]
+            seen.append(("score", horizon))
+            return {
+                "score": 0.02 + horizon / 1000,
+                "capital_final": 10000 + horizon * 2,
+                "return_total": horizon * 2 / 10000,
+                "max_drawdown": -0.1,
+                "worst_fold_return": -0.03,
+                "sharpe": 0.5,
+                "brier": 0.2,
+                "mae": 0.005,
+            }
+
+        monkeypatch.setattr(strategy_research, "_prepare", fake_prepare)
+        monkeypatch.setattr(strategy_research, "_score", fake_score)
+        # The synthetic archive first OOS starts at 2024-01-01, unlike this
+        # artificial test period. Use the archived first boundary as ground truth.
+        with SessionLocal() as session:
+            stored = session.get(MLBacktestAudit, source)
+            with ZipFile(BytesIO(stored.archive_zip)) as z:
+                first = pd.Timestamp(json.loads(z.read("folds.json"))[0]["test_start"])
+        test_start = first
+        strategy_research._run_optimization(strategy_id)
+        result = strategy_research.get_strategy(strategy_id)
+        assert result["status"] == "OPTIMIZED", result["error_message"]
+        assert len(result["trials"]) == 4
+        assert [h for typ, h in seen if typ == "prepare"] == [2, 6, 24]
+        assert len([h for typ, h in seen if typ == "score"]) == 12
+        best = result["champion"]["metrics"]
+        assert sorted(best["per_horizon"].keys()) == ["2", "24", "6"]
+        assert best["score_method"] == "0.70_mean_0.30_worst"
+        assert result["summary"]["horizons_hours"] == [2, 6, 24]
+        assert result["summary"]["oos_untouched_from"] == first.isoformat()
+    finally:
+        _cleanup(source)
 
 
 def test_candidate_respects_lightgbm_depth_constraints_and_is_reproducible():
