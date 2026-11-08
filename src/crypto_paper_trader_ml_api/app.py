@@ -17,7 +17,7 @@ from .schemas import (
     RuntimeParametersResponse,
     RuntimeParametersUpdateRequest,
 )
-from .service import cancel_job, create_job, get_audit_zip, get_job, list_jobs
+from .service import cancel_job, create_job, create_replay_job, get_audit_zip, get_job, list_jobs
 from .settings_service import (
     ParameterValidationError,
     get_runtime_parameters,
@@ -88,6 +88,17 @@ def start_backtest(request: MLBacktestCreate) -> dict:
         return create_job(request)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/v1/ml-backtests/{job_id}/replay", response_model=MLBacktestJobResponse, status_code=202)
+def replay_backtest_from_database(job_id: str) -> dict:
+    """Run V2 against the original audited BTC candles with one UI action."""
+    try:
+        return create_replay_job(job_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/v1/ml-backtests", response_model=list[MLBacktestJobResponse])
