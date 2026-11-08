@@ -123,7 +123,7 @@ def test_terminal_liquidation_is_reflected_in_final_position_and_actions():
         "timestamp": pd.date_range("2026-01-01", periods=4, freq="30min", tz="UTC"),
         "open": [100.0] * 4, "high": [100.1] * 4,
         "low": [99.9] * 4, "close": [100.0] * 4,
-        "atr_14": [1.0] * 4, "ema_21": [101.0] * 4,
+        "atr_14": [1.0] * 4, "ema_21": [99.5] * 4,
         "ema_50": [99.0] * 4, "trend_ema_gap": [0.01] * 4,
         "entry_probability": [0.9, 0.1, 0.1, 0.1],
         "exit_probability": [0.1, 0.1, 0.1, 0.1],
@@ -135,6 +135,15 @@ def test_terminal_liquidation_is_reflected_in_final_position_and_actions():
         "simulation.minimum_trend_gap": 0.0,
     })
     simulated = simulate_portfolio(frame, _request(), params)
+    # With BTC above EMA 21, the strategy must remain exposed until the
+    # final candle instead of exiting early with TREND_INVALIDATION.
+    assert [row["position"] for row in simulated["rotation_rows"][:-1]] == [
+        "CASH", "BTC", "BTC"
+    ]
+    assert [event["reason"] for row in simulated["rotation_rows"]
+            for event in row["actions"] if event["action"] == "SELL"] == [
+        "END_OF_TEST"
+    ]
     last = simulated["rotation_rows"][-1]
     assert last["position"] == "CASH"
     assert last["actions"][-1]["action"] == "SELL"
