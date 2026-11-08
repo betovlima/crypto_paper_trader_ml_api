@@ -38,8 +38,19 @@ Não são habilitadas ordens reais.
   `model_metadata.json` e `manifest.json`.
 - A mudança de timestamps Spot para microssegundos em 01/01/2025 é
   tratada por candle; timestamps internos retornam UTC e milissegundos.
-- Candles faltantes e arquivos indisponíveis geram erro explícito.
-  Não há interpolação, reconstrução ou complemento automático com MEXC.
+- Se a série principal apresentar até 12 horários UTC ausentes, a API
+  tenta consultar os ZIPs **diários oficiais da própria Binance**, com
+  verificação de SHA-256, somente para os horários ausentes. Cada ZIP
+  complementar fica registrado no manifesto da execução.
+- Se o candle também não estiver disponível no arquivo diário, ou
+  se houver mais de 12 ausências, o backtest falha informando os
+  timestamps UTC faltantes e as tentativas realizadas. Nunca reduz
+  automaticamente a janela nem substitui preços por interpolação,
+  candles artificiais ou dados da MEXC.
+- A contagem solicitada deve ser alcançada **exatamente**, e o período
+  recuperado deve ter intervalos cronológicos consecutivos.
+  Uma ausência persistente é uma limitação real da fonte, e não
+  justificativa para fabricar uma observação.
 - `market.max_candles` continua sendo respeitado.
 - A exportação inclui candles brutos, folds, probabilidades OOS,
   patrimônio, operações, parâmetros e proveniência da origem.
@@ -69,3 +80,19 @@ Os testes de coleta usam tráfego HTTP simulado, sem baixar arquivos
 de qualquer corretora. O download real precisa ser verificado executando
 um novo backtest e exportando um ZIP com `history_source` e
 `market_archive_checksums`.
+
+## Falha "Requested 70378, only 70376"
+
+Uma coleta real de 08/11/2026 encontrou dois candles a menos do que o
+solicitado. O erro anterior não informava se a ausência estava nas
+bordas da janela ou dentro da série. Agora a coleta:
+
+1. Calcula todos os horários UTC esperados e compara com os recebidos.
+2. Tenta recuperar até 12 lacunas nos arquivos diários do mesmo
+   mercado Binance Spot, autenticando os ZIPs por SHA-256.
+3. Registra no manifesto arquivos complementares, hashes e quantidade
+   de candles recuperados.
+4. Falha indicando os horários ausentes caso não consiga a série completa.
+
+Essa correção preserva o rigor da pesquisa. Ela não garante que candles
+nunca negociados ou não publicados pela corretora possam ser recuperados.
