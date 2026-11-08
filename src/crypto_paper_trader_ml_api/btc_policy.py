@@ -134,6 +134,7 @@ def simulate_rotations(
     fee_model: str | None = None,
     alpaca_liquidity: str | None = None,
     alpaca_initial_30d_volume_usd: float | None = None,
+    fee_multiplier: float = 1.0,
 ) -> dict:
     """Signal at prior close -> fill at next open, at most one trade per candle."""
     cfg = validate_policy(policy)
@@ -144,6 +145,8 @@ def simulate_rotations(
         if alpaca_initial_30d_volume_usd is None
         else alpaca_initial_30d_volume_usd
     )
+    if not math.isfinite(fee_multiplier) or not 1 <= fee_multiplier <= 2:
+        raise ValueError("Multiplicador do cenário de custos inválido")
     if fee_model not in {"FIXED", ALPACA_FEE_MODEL}:
         raise ValueError("Modelo de custos BTC/CASH inválido")
     ledger = AlpacaFeeLedger(alpaca_liquidity, start_volume) if fee_model == ALPACA_FEE_MODEL else None
@@ -173,7 +176,8 @@ def simulate_rotations(
     exposure, cycles, wins, losses, fees_paid = 0, 0, 0, 0, 0.0
     gross_wins, gross_losses = 0.0, 0.0
     actions, points, equity_values = [], [], []
-    initial_fee = ledger.quote(_timestamp(candles[first]["timestamp"]))["rate"] if ledger else fee
+    cycle_gains: list[float] = []
+    initial_fee = (ledger.quote(_timestamp(candles[first]["timestamp"]))["rate"] if ledger else fee) * fee_multiplier
     rt_cost = round_trip_cost(initial_fee, initial_fee, slippage)
     gross_profit_before_costs = 0.0
     slippage_paid = 0.0
@@ -189,7 +193,7 @@ def simulate_rotations(
             "rate": fee, "tier": None, "volume_30d_usd": None,
             "liquidity": "FIXED", "tier_cutoff_at": None,
         }
-        applied_fee = quote["rate"]
+        applied_fee = quote["rate"] * fee_multiplier
         if side == "BUY":
             gross = cash
             cost = gross * applied_fee
@@ -219,6 +223,7 @@ def simulate_rotations(
             last_sale_index = index
             cycles += 1
             gain = cash - cycle_cost
+            cycle_gains.append(float(gain))
             if gain > 0:
                 wins += 1
                 gross_wins += gain
@@ -229,7 +234,10 @@ def simulate_rotations(
             position_start = -1
         actions.append({
             "timestamp": at.isoformat(), "action": side, "reason": reason,
-            "fee_model": fee_model, "fee_rate": applied_fee,
+            "candle_index": index,
+            "cycle_net_profit_usd": float(gain) if side == "SELL" else None,
+            "fee_model": fee_model,
+        "fee_multiplier": fee_multiplier, "fee_rate": applied_fee,
             "fee_tier": quote["tier"], "liquidity": quote["liquidity"],
             "fee_30d_volume_usd": quote["volume_30d_usd"],
             "fee_tier_cutoff_at": quote["tier_cutoff_at"],
@@ -264,7 +272,7 @@ def simulate_rotations(
             estimate = float(signal["predicted_return"]) if signal else None
             votes = int(signal.get("positive_votes", 3)) if signal else None
             if btc == 0:
-                current_fee = ledger.quote(current_time)["rate"] if ledger else fee
+                current_fee = (ledger.quote(current_time)["rate"] if ledger else fee) * fee_multiplier
                 current_round_trip = round_trip_cost(current_fee, current_fee, slippage)
                 if (
                     signal is not None
@@ -330,6 +338,21 @@ def simulate_rotations(
         left = block * (len(values) - 1) // group_count
         right = (block + 1) * (len(values) - 1) // group_count
         fold_returns.append(values[right] / values[left] - 1 if values[left] > 0 else -1)
+    segment_cycle_counts = [0, 0, 0]
+    for action in actions:
+        if action["action"] == "SELL":
+            slot = min(2, 3 * (action["candle_index"] - first) // len(equity_values))
+            segment_cycle_counts[slot] += 1
+    winners = [gain for gain in cycle_gains if gain > 0]
+    losers = [-gain for gain in cycle_gains if gain <= 0]
+    average_win = sum(winners) / len(winners) if winners else 0.0
+    average_loss = sum(losers) / len(losers) if losers else 0.0
+    average_win_loss_ratio = (
+        average_win / average_loss if average_loss > 0 else (
+            None if not winners else 999999.0
+        )
+    )
+    largest_win_share = max(winners) / sum(winners) if winners else 0.0
     duration = (
         _timestamp(candles[last]["timestamp"]) - _timestamp(candles[first]["timestamp"])
     ).total_seconds() / 86400
@@ -348,6 +371,13 @@ def simulate_rotations(
         "exposure": exposure / len(points),
         "switch_count": len(actions),
         "completed_cycles": cycles, "buys": cycles,
+        "segment_cycle_counts": segment_cycle_counts,
+        "segment_returns": fold_returns,
+        "average_winning_cycle_usd": float(average_win),
+        "average_losing_cycle_usd": float(average_loss),
+        "average_win_loss_ratio": float(average_win_loss_ratio) if average_win_loss_ratio is not None else None,
+        "largest_win_share_of_gross_wins": float(largest_win_share),
+        "largest_losing_cycle_usd": float(max(losers, default=0)),
         "sells": cycles, "wins": wins, "losses": losses,
         "win_rate": wins / cycles if cycles else 0.0,
         "profit_factor": gross_wins / gross_losses if gross_losses > 0 else None,
