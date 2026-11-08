@@ -1,0 +1,25 @@
+name: Crypto ML LightGBM validation
+
+on:
+  push:
+    branches:
+      - feature/lightgbm-ml-replacement-v3-20261108
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Poetry
+        run: pip install 'poetry>=2.2,<3'
+      - name: Validate dependency lock
+        run: poetry check --lock
+      - name: Install project and tests
+        run: poetry install --no-interaction
+      - name: Run ML API tests
+        run: poetry run pytest -q
