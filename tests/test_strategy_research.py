@@ -282,6 +282,11 @@ def test_one_optimization_campaign_evaluates_all_horizons_without_oos_leakage(mo
             with ZipFile(BytesIO(stored.archive_zip)) as z:
                 first = pd.Timestamp(json.loads(z.read("folds.json"))[0]["test_start"])
         test_start = first
+        # The 6-candle fixture is intentionally too short to demonstrate
+        # six independent trades; unit-test the chronological wiring here,
+        # while dedicated robustness tests enforce the real threshold.
+        monkeypatch.setattr(strategy_research, "assess_robustness",
+                            lambda base, stress: {"passed": True, "reason_codes": []})
         strategy_research._run_optimization(strategy_id)
         result = strategy_research.get_strategy(strategy_id)
         assert result["status"] == "OPTIMIZED", result["error_message"]
@@ -290,7 +295,7 @@ def test_one_optimization_campaign_evaluates_all_horizons_without_oos_leakage(mo
         assert len([h for typ, h in seen if typ == "score"]) == 12
         best = result["champion"]["metrics"]
         assert sorted(best["per_horizon"].keys()) == ["2", "24", "6"]
-        assert best["score_method"] == "joint_compounded_capital_risk_adjusted"
+        assert best["score_method"] == "joint_compounded_capital_risk_adjusted_v9_stress_min"
         assert best["capital_note"].startswith("Um patrimônio")
         assert best["policy"]["policy.entry_probability"] >= .30
         assert best["switch_count"] >= 2
