@@ -417,7 +417,12 @@ def _score(
     magnitude_quality = describe_return_predictions(
         forecasts, actual,
         training_baseline_return=float(train["forecast_realized_return"].mean()),
-        horizon_hours=int(request.horizon_hours),
+        # ResolvedMLBacktestCreate has no scalar horizon_hours; the archived
+        # label timestamp is the ground truth for this prepared horizon.
+        horizon_hours=int(round(
+            (pd.Timestamp(scoring["forecast_future_at_utc"].iloc[0])
+             - pd.Timestamp(scoring["timestamp"].iloc[0])).total_seconds() / 3600
+        )),
     )
     capital = _simulate(
         scoring, probs, forecasts, request.fee_rate, request.slippage_rate,
