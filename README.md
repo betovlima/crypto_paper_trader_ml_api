@@ -2,6 +2,63 @@
 
 Independent API for long-period LightGBM walk-forward backtests. It is separate from the paper-trading API and never sends real orders.
 
+## BTC/CASH V10: stress of the *same operations* and forecast-quality diagnostics
+
+V10 fixes an important flaw in V9: increasing execution costs could cause
+the policy to fail its buy threshold, perform **zero operations** and end
+with $10,000 in CASH. That was not a valid measure of the effect of costs on
+the original traded strategy.
+
+- Baseline optimization still uses the causal prior-close to next-open
+  BTC/CASH engine with Alpaca taker fees and slippage.
+- V10 retains the **entire original pre-OOS fill schedule**, including
+  every buy, sell and the final liquidation. It then replays the same
+  candle indices, prices, sides and execution times under 25% higher
+  hypothetical commissions and 2x slippage.
+- The replay recomputes BTC received, USD received, compounded portfolio
+  value and the actual Alpaca 30-day fee tier based on newly computed fill
+  notionals. It never reruns buy/exit filters, so higher cost **cannot
+  erase operations**.
+- The replay is checked against the original simulation using the original
+  rates (fee multiplier 1, original slippage) and must reproduce the same
+  capital, fees, Sharpe and drawdown. The robustness gate also rejects
+  stress results without the same operation count and frozen-schedule proof.
+- V9's minimum-cycle, temporal distribution, positive net profit,
+  gain/loss and concentration requirements remain unchanged. Winner
+  selection uses the lower of normal and *same-fill stressed* risk-adjusted
+  capital scores.
+- Research ZIPs and collapsed Front diagnostics include normal versus
+  stressed capital and operation counts, stressed fees and slippage, and
+  reasons for rejecting candidates.
+
+### Understanding whether LightGBM predicts *magnitude*
+
+For each 2h, 6h and 24h horizon, V10 records in its **PRE-OOS validation
+partition only**:
+
+* Return MAE and RMSE from LightGBM, compared with a constant return
+  estimated from the earlier **training** partition. A positive skill
+  score means fewer errors than that simple baseline; negative means worse.
+* Mean predicted versus realized returns, bias, correlation and directional
+  accuracy.
+* Ratio of predicted-return standard deviation to the observed-return
+  standard deviation. Near-zero values reveal that forecasts are too flat
+  to discriminate large BTC movements.
+* Five ranked prediction buckets, with realized average return for each.
+  Overlapping future horizons mean observations are not independent
+  samples. The data remain descriptive and are **never features or
+  inputs to the live decision policy**.
+
+The Front retains the same **three buttons at the top** (Create Strategy,
+Optimize and Run, Export ZIP). Technical diagnostics stay in collapsible
+sections and are available even for NO_TRADES/INSUFFICIENT_EVIDENCE.
+
+**Research limitation:** The V8 and V9 historical OOS periods have already
+been examined. While V10 continues to exclude OOS candles from all
+automatic parameter selection, reusing the same period cannot provide a
+fresh independent external test. Prefer future, previously unseen market
+observations before claiming generalization or enabling real trading.
+
 ## BTC/CASH V9: evidence-based selection before OOS
 
 The same **three buttons** (Create, Optimize-and-Run, Export) remain at the
