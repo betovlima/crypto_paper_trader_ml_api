@@ -98,7 +98,10 @@ def calibration_diagnostics(
     calibrated = np.clip(np.asarray(calibrated_test, dtype=float), 0.0, 1.0)
     model = getattr(calibrator, "model", None)
     return {
-        "method": "logistic_platt" if model is not None else "identity",
+        "method": getattr(calibrator, "method", "logistic_platt" if model is not None else "identity"),
+        "method_selection": "chronological_last_quarter_of_calibration_only",
+        "calibration_method_selection_rows": getattr(calibrator, "selection_rows", 0),
+        "calibration_method_selection_brier": getattr(calibrator, "selection_brier", None),
         "calibration_rows": len(cal_labels),
         "calibration_observed_up_rate": float(np.mean(cal_labels)),
         "calibration_raw_brier": float(brier_score_loss(cal_labels, raw_cal)),
