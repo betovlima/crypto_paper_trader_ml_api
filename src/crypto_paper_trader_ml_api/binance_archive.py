@@ -42,6 +42,49 @@ MAX_COMPRESSED_BYTES = 16 * 1024 * 1024
 MAX_UNCOMPRESSED_BYTES = 96 * 1024 * 1024
 MAX_DAILY_REPAIR_SLOTS = 12
 
+# Binance confirmed a Spot-wide trading interruption on 2023-03-24,
+# resuming at 14:00 UTC. These two 30-minute candle slots were absent
+# from BOTH the official monthly and daily BTCUSDT Spot archives.
+# This allowlist is deliberately narrow; all other gaps remain fatal.
+DOCUMENTED_BTCUSDT_SPOT_30M_HALT = (
+    "2023-03-24T13:00:00+00:00",
+    "2023-03-24T13:30:00+00:00",
+)
+BINANCE_HALT_20230324_SOURCE = (
+    "https://www.binance.com/en/support/announcement/detail/"
+    "813a31506e9f478ea8c1058b425df87a"
+)
+
+
+def _known_spot_halt(
+    *, symbol: str, timeframe: str,
+    missing: pd.DatetimeIndex, unexpected: pd.DatetimeIndex,
+) -> list[dict]:
+    """Accept only the exact independently documented market closure."""
+    expected_halt = pd.DatetimeIndex(
+        [pd.Timestamp(ts) for ts in DOCUMENTED_BTCUSDT_SPOT_30M_HALT]
+    )
+    if (
+        symbol == "BTCUSDT"
+        and timeframe == "30min"
+        and len(unexpected) == 0
+        and len(missing) == len(expected_halt)
+        and missing.equals(expected_halt)
+    ):
+        return [{
+            "event": "BINANCE_SPOT_TRADING_HALT",
+            "date": "2023-03-24",
+            "missing_candle_openings_utc": [
+                stamp.isoformat() for stamp in missing
+            ],
+            "missing_candles": len(missing),
+            "source_url": BINANCE_HALT_20230324_SOURCE,
+            "market_status": "SPOT_TRADING_SUSPENDED",
+            "trading_resumed_at_utc": "2023-03-24T14:00:00+00:00",
+        }]
+    return []
+
+
 
 class BinanceArchiveError(ValueError):
     """Missing, corrupted, inconsistent, or incomplete historical source."""
@@ -168,6 +211,7 @@ class BinancePublicArchiveClient:
             headers={"User-Agent": f"crypto-paper-trader-ml/{app_version}"},
         )
         self.archive_manifest: dict[str, list[dict]] = {}
+        self.market_interruptions: dict[str, list[dict]] = {}
 
     def close(self) -> None:
         self.client.close()
@@ -353,7 +397,18 @@ class BinancePublicArchiveClient:
         present = pd.DatetimeIndex(pd.to_datetime(frame["timestamp"], utc=True))
         missing = expected.difference(present)
         unexpected = present.difference(expected)
-        if len(missing) or len(unexpected) or len(frame) != required_with_warmup:
+        allowed_halts = _known_spot_halt(
+            symbol=symbol, timeframe=timeframe,
+            missing=missing, unexpected=unexpected,
+        )
+        self.market_interruptions[timeframe] = allowed_halts
+        if (
+            (len(missing) or len(unexpected) or len(frame) != required_with_warmup)
+            and not (
+                allowed_halts
+                and len(frame) == required_with_warmup - len(missing)
+            )
+        ):
             missing_details = ", ".join(
                 timestamp.isoformat() for timestamp in missing[:12]
             ) or "none"
