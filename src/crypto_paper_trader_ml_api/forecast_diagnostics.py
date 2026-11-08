@@ -47,7 +47,7 @@ def tree_diagnostics(model, predictions: np.ndarray) -> dict:
     })
 
     def count_nodes(node: dict) -> tuple[int, int]:
-        if "leaf_index" in node:
+        if "leaf_value" in node:
             return 0, 1
         children = ("left_child", "right_child")
         counts = [count_nodes(node[child]) for child in children if child in node]
