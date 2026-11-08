@@ -329,6 +329,11 @@ def _run_optimization(strategy_id: str) -> None:
         winner: dict | None = None
         best_score = -float("inf")
         for index in range(trials_count):
+            with SessionLocal() as session:
+                current = session.get(MLResearchStrategy, strategy_id)
+                if current is None or current.status == "CANCEL_REQUESTED":
+                    _update_strategy(strategy_id, status="CANCELLED", error_message=None)
+                    return
             vector = _next_candidate(index, mode, points, scores, sampler, rng)
             candidate = _candidate(vector)
             try:
@@ -363,7 +368,7 @@ def _run_optimization(strategy_id: str) -> None:
             "selected_score": best_score,
             "completed_trials": sum(item["status"] == "COMPLETED" for item in records),
             "failed_trials": sum(item["status"] == "FAILED" for item in records),
-            "historical_source_job_id": original.symbol and row.source_job_id,
+            "historical_source_job_id": row.source_job_id,
             "selection_warning": "Resultados de seleção interna, não são o teste final OOS.",
         }
         _update_strategy(
@@ -401,6 +406,20 @@ def start_optimization(strategy_id: str, *, mode: str, trials: int) -> dict:
     from .settings_service import get_runtime_parameters
     _get_executor(get_runtime_parameters()).submit(_run_optimization, strategy_id)
     return get_strategy(strategy_id)
+
+
+def cancel_optimization(strategy_id: str) -> dict:
+    """Cancel the ongoing campaign at the next completed trial."""
+    with SessionLocal.begin() as session:
+        row = session.get(MLResearchStrategy, strategy_id)
+        if row is None:
+            raise LookupError("Estratégia de pesquisa não encontrada")
+        if row.status != "RUNNING":
+            raise ValueError("Não há otimização em andamento para cancelar")
+        row.status = "CANCEL_REQUESTED"
+        row.updated_at = _now()
+        session.flush()
+        return _decode(row)
 
 
 def execute_strategy(strategy_id: str) -> dict:
