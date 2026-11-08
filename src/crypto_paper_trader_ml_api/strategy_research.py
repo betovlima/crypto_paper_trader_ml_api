@@ -582,6 +582,8 @@ def _run_optimization(strategy_id: str) -> None:
             original, snapshot = inspect_source_archive(record.archive_zip)
             archive = record.archive_zip
             mode, horizon, trials_count = row.mode, row.horizon_hours, row.trials_target
+            # Persist intent in the existing summary column, without schema migrations.
+            automatic_execution = bool(json.loads(row.summary_json or "{}").get("auto_execute", False))
         base = get_runtime_parameters_from_snapshot(snapshot)
         # New learner settings are drawn from the current DB. All features
         # and original chronological splits stay pinned to the source archive.
@@ -743,13 +745,24 @@ def _run_optimization(strategy_id: str) -> None:
         }
         _update_strategy(
             strategy_id, status="OPTIMIZED", progress=100,
-            summary_json=json.dumps(summary, allow_nan=False), error_message=None,
+            summary_json=json.dumps({**summary, "auto_execute": automatic_execution}, allow_nan=False),
+            error_message=None,
         )
+        # The same server-side workflow schedules the final replay. No second
+        # frontend click or dependency on an open browser tab is required.
+        if automatic_execution:
+            try:
+                execute_strategy(strategy_id)
+            except Exception as exc:
+                # Retain the optimized champion so execution can be recovered;
+                # do not silently convert a successful optimization into FAILED.
+                _update_strategy(strategy_id, status="OPTIMIZED",
+                                 error_message="Execução OOS automática não iniciada: " + str(exc)[:800])
     except Exception as exc:
         _update_strategy(strategy_id, status="FAILED", error_message=str(exc)[:1000])
 
 
-def start_optimization(strategy_id: str, *, mode: str, trials: int) -> dict:
+def start_optimization(strategy_id: str, *, mode: str, trials: int, auto_execute: bool = False) -> dict:
     if mode not in {"QUICK", "BAYESIAN"}:
         raise ValueError("Modo de otimização inválido")
     if not 4 <= trials <= MAX_TRIALS:
@@ -768,7 +781,7 @@ def start_optimization(strategy_id: str, *, mode: str, trials: int) -> dict:
         row.progress = 0
         row.trials_json = "[]"
         row.champion_json = None
-        row.summary_json = None
+        row.summary_json = json.dumps({"auto_execute": bool(auto_execute)})
         row.error_message = None
         row.updated_at = _now()
     # Shared job executor; no background promises and no shell scripts.
