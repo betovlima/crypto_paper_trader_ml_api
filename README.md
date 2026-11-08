@@ -2,6 +2,31 @@
 
 Independent API for long-period LightGBM walk-forward backtests. It is separate from the paper-trading API and never sends real orders.
 
+## BTC/CASH V7: probabilistic entry thresholds and broader pre-OOS validation
+
+The V6 research workflow still uses **only three top-of-screen actions**.
+V7 fixes two simultaneous entry blockers: the minimum probability has
+become a searched policy threshold (including probabilities below 50%), and
+a horizon with a positive predicted return now contributes a positive vote
+regardless of its probability being below 50%. The calibrated aggregate
+probability remains a separate decision filter, as does expected return
+after fees/slippage.
+
+The probability calibrator evaluates identity, Platt on raw probabilities
+and Platt on log-odds using a **chronological tail of each horizon's own
+calibration partition**. Selection/test labels are not used for calibration
+method choice. Audit records the method, calibration Brier and sample count.
+
+The economic selection window is now the last 25% of up to 48,000 available
+candles preceding the **first untouched OOS boundary**, compared with 13%
+of up to 16,000 candles in V6. One reinvested BTC/CASH portfolio is
+evaluated with three chronological risk segments. The final OOS is never
+used to choose hyperparameters, policy thresholds or calibration methods.
+
+The goal is compound net capital growth with risk controls, not the number
+of trades. These changes allow opportunities to be evaluated, but do not
+guarantee profitable trades.
+
 ## BTC/CASH V5: compound capital and causal rotation research
 
 The **Laboratório ML** page is the only user-facing workflow. LightGBM
