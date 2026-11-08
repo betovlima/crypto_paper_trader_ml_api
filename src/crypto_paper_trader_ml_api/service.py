@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from sqlalchemy import desc
 
-from .database import MLBacktestJob, SessionLocal
+from .database import MLBacktestAudit, MLBacktestJob, SessionLocal
 from .engine import run_ml_backtest
 from .schemas import MLBacktestCreate, ResolvedMLBacktestCreate
 from .settings_service import (
@@ -58,6 +58,7 @@ def _serialize_job(job: MLBacktestJob, include_result: bool = False) -> dict:
         "completed_at": job.completed_at,
     }
     if include_result:
+        payload["audit_available"] = False
         payload["request"] = json.loads(job.request_json)
         payload["settings_snapshot"] = (
             json.loads(job.settings_snapshot_json) if job.settings_snapshot_json else None
@@ -185,7 +186,22 @@ def list_jobs(limit: int) -> list[dict]:
 def get_job(job_id: str, include_result: bool = True) -> dict | None:
     with SessionLocal() as session:
         job = session.get(MLBacktestJob, job_id)
-        return _serialize_job(job, include_result=include_result) if job else None
+        if job is None:
+            return None
+        payload = _serialize_job(job, include_result=include_result)
+        if include_result:
+            payload["audit_available"] = session.get(MLBacktestAudit, job_id) is not None
+        return payload
+
+
+def get_audit_zip(job_id: str) -> tuple[str | None, bytes | None]:
+    """Load the exact archive recorded with this job, never rebuild OOS history."""
+    with SessionLocal() as session:
+        job = session.get(MLBacktestJob, job_id)
+        if job is None:
+            return None, None
+        record = session.get(MLBacktestAudit, job_id)
+        return job.status, record.archive_zip if record is not None else None
 
 
 def cancel_job(job_id: str) -> dict | None:
@@ -228,12 +244,16 @@ def _run_job(job_id: str) -> None:
         parameters = get_runtime_parameters_from_snapshot(snapshot)
 
     try:
+        archive_contents: list[bytes] = []
         result = run_ml_backtest(
             request,
             parameters,
             lambda value, stage: _update_progress(job_id, value, stage),
             lambda: _is_cancelled(job_id),
+            audit_writer=archive_contents.append,
         )
+        if len(archive_contents) != 1:
+            raise RuntimeError("No complete audit archive was generated for this backtest")
         with SessionLocal.begin() as session:
             job = session.get(MLBacktestJob, job_id)
             if not job:
@@ -246,6 +266,7 @@ def _run_job(job_id: str) -> None:
                 job.stage = "Completed"
                 job.progress = 100
                 job.result_json = json.dumps(result, separators=(",", ":"), allow_nan=False)
+                session.add(MLBacktestAudit(job_id=job.id, archive_zip=archive_contents[0]))
             job.completed_at = datetime.now(timezone.utc)
     except InterruptedError:
         with SessionLocal.begin() as session:
