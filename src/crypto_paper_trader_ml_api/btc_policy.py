@@ -112,6 +112,7 @@ def simulate_rotations(
     slippage: float = 0.0005, bar_seconds: int = 1800,
     label: str = "LIGHTGBM_ROTATION",
     audit_limit: int = 200,
+    timeline_limit: int | None = 500,
 ) -> dict:
     """Signal at prior close -> fill at next open, at most one trade per candle."""
     cfg = validate_policy(policy)
@@ -125,7 +126,7 @@ def simulate_rotations(
     previous = first_time
     for candle in candles:
         when = _timestamp(candle["timestamp"])
-        if when < previous:
+        if when < previous or (when == previous and when != first_time):
             raise ValueError("Candles fora da ordem temporal")
         previous = when
     cash, btc = float(initial_capital), 0.0
@@ -137,7 +138,6 @@ def simulate_rotations(
     peak_close = 0.0
     position_start = -1
     last_sale_index = -100000
-    prev_close = None
     peak_equity, drawdown = cash, 0.0
     exposure, cycles, wins, losses, fees_paid = 0, 0, 0, 0, 0.0
     gross_wins, gross_losses = 0.0, 0.0
@@ -197,12 +197,14 @@ def simulate_rotations(
             and current_time - _timestamp(candles[index - 1]["timestamp"])
             == timedelta(seconds=bar_seconds)
         )
-        if consecutive and signal and last_exec_index != index:
-            p, estimate = float(signal["p_up"]), float(signal["predicted_return"])
-            votes = int(signal.get("positive_votes", 3))
+        if consecutive and last_exec_index != index:
+            p = float(signal["p_up"]) if signal else None
+            estimate = float(signal["predicted_return"]) if signal else None
+            votes = int(signal.get("positive_votes", 3)) if signal else None
             if btc == 0:
                 if (
-                    index - last_sale_index > cfg["policy.cooldown_bars"]
+                    signal is not None
+                    and index - last_sale_index > cfg["policy.cooldown_bars"]
                     and votes >= cfg["policy.min_positive_votes"]
                     and p >= cfg["policy.entry_probability"]
                     and estimate > rt_cost + cfg["policy.entry_edge"]
@@ -210,17 +212,19 @@ def simulate_rotations(
                     perform("BUY", price_open, current_time, index, "MODEL_ENTRY", signal)
                     last_exec_index = index
             else:
-                # At index OPEN, only the previous candle close is known.
-                # This is a close-confirmed stop, NOT a fill at the stop price.
+                # Close-confirmed risk exits must work EVEN IF no new model
+                # prediction is available. Fills are still next-bar OPEN.
                 held = index - position_start
                 close_prev = float(candles[index - 1]["close"])
                 stop_loss = close_prev <= entry_price * (1 - cfg["policy.stop_loss"])
                 trailing = close_prev <= peak_close * (1 - cfg["policy.trailing_stop"])
                 take_profit = close_prev >= entry_price * (1 + cfg["policy.take_profit"])
                 model_exit = (
-                    p <= cfg["policy.exit_probability"]
-                    or estimate <= cfg["policy.exit_return"]
-                    or votes < cfg["policy.min_positive_votes"]
+                    signal is not None and (
+                        p <= cfg["policy.exit_probability"]
+                        or estimate <= cfg["policy.exit_return"]
+                        or votes < cfg["policy.min_positive_votes"]
+                    )
                 )
                 reason = (
                     "STOP_LOSS" if stop_loss else
@@ -240,7 +244,6 @@ def simulate_rotations(
         timestamp = (current_time + timedelta(seconds=bar_seconds)).isoformat()
         points.append({"timestamp": timestamp, "equity": float(value), "position": "BTC" if btc else "CASH"})
         equity_values.append(float(value))
-        prev_close = price_close
 
     # Liquidate at last *known* candle close; never use a future price.
     if btc:
@@ -266,7 +269,7 @@ def simulate_rotations(
     duration = (
         _timestamp(candles[last]["timestamp"]) - _timestamp(candles[first]["timestamp"])
     ).total_seconds() / 86400
-    stride = max(1, math.ceil(len(points) / 500))
+    stride = max(1, math.ceil(len(points) / timeline_limit)) if timeline_limit else 1
     sampled = [p for index, p in enumerate(points) if index % stride == 0 or index == len(points) - 1]
     return {
         "code": label,
