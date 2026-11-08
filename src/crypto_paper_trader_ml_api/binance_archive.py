@@ -40,6 +40,7 @@ KLINE_COLUMNS = [
 ]
 MAX_COMPRESSED_BYTES = 16 * 1024 * 1024
 MAX_UNCOMPRESSED_BYTES = 96 * 1024 * 1024
+MAX_DAILY_REPAIR_SLOTS = 12
 
 
 class BinanceArchiveError(ValueError):
@@ -171,6 +172,107 @@ class BinancePublicArchiveClient:
     def close(self) -> None:
         self.client.close()
 
+    def _read_verified_archive(
+        self, path: str, *, cutoff_ms: int
+    ) -> tuple[list[dict], dict]:
+        """Use the same SHA256 verification for monthly and daily ZIPs."""
+        try:
+            response = self.client.get(path)
+            response.raise_for_status()
+            checksum_response = self.client.get(path + ".CHECKSUM")
+            checksum_response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise BinanceArchiveError(
+                f"Archive or SHA256 checksum unavailable: {BASE_URL}{path}"
+            ) from exc
+
+        checksum_text = checksum_response.text.strip().split()
+        if not checksum_text or not re.fullmatch(r"[0-9a-fA-F]{64}", checksum_text[0]):
+            raise BinanceArchiveError(f"Malformed checksum for {BASE_URL}{path}")
+        expected_hash = checksum_text[0].lower()
+        downloaded = response.content
+        actual_hash = sha256(downloaded).hexdigest()
+        if actual_hash != expected_hash:
+            raise BinanceArchiveError(f"SHA256 mismatch for {BASE_URL}{path}")
+
+        rows = _parse_zip(
+            downloaded, path.rsplit("/", 1)[-1].removesuffix(".zip") + ".csv",
+            cutoff_ms=cutoff_ms,
+        )
+        return rows, {
+            "url": BASE_URL + path,
+            "sha256": actual_hash,
+            "rows": len(rows),
+        }
+
+    def _repair_small_gaps_from_daily(
+        self,
+        *,
+        symbol: str,
+        interval: str,
+        frame: pd.DataFrame,
+        expected: pd.DatetimeIndex,
+        cutoff_ms: int,
+        cancelled: Callable[[], bool] | None,
+    ) -> tuple[pd.DataFrame, list[dict], list[str]]:
+        """Repair only documented missing timestamps from verified Binance daily files.
+
+        Never create candles, borrow MEXC prices, or treat a missing file as
+        evidence that trading occurred. If verified daily history also lacks
+        a candle, return the gap so the backtest can fail explicitly.
+        """
+        present = pd.DatetimeIndex(pd.to_datetime(frame["timestamp"], utc=True))
+        missing = expected.difference(present)
+        if missing.empty:
+            return frame, [], []
+        if len(missing) > MAX_DAILY_REPAIR_SLOTS:
+            return frame, [], [
+                f"Skipped daily recovery: {len(missing)} absent timestamps "
+                f"exceed safety limit {MAX_DAILY_REPAIR_SLOTS}"
+            ]
+
+        verified: list[dict] = []
+        attempts: list[str] = []
+        missing_days = sorted({timestamp.strftime("%Y-%m-%d") for timestamp in missing})
+        retrieved: list[dict] = []
+        missing_set = set(missing)
+        for date in missing_days:
+            if cancelled and cancelled():
+                raise InterruptedError("Backtest cancellation requested")
+            path = (
+                f"/data/spot/daily/klines/{symbol}/{interval}/"
+                f"{symbol}-{interval}-{date}.zip"
+            )
+            try:
+                rows, metadata = self._read_verified_archive(
+                    path, cutoff_ms=cutoff_ms
+                )
+            except BinanceArchiveError as exc:
+                attempts.append(str(exc))
+                continue
+            selected = [
+                row for row in rows
+                if row["timestamp"] in missing_set
+            ]
+            retrieved.extend(selected)
+            verified.append({
+                **metadata,
+                "role": "VERIFIED_DAILY_GAP_REPAIR",
+                "recovered_candles": len(selected),
+            })
+            attempts.append(
+                f"{date}: {len(selected)} missing candles found in verified daily archive"
+            )
+
+        if retrieved:
+            frame = (
+                pd.concat([frame, pd.DataFrame.from_records(retrieved)], ignore_index=True)
+                .drop_duplicates(subset=["timestamp"], keep="first")
+                .sort_values("timestamp")
+                .reset_index(drop=True)
+            )
+        return frame, verified, attempts
+
     def fetch_history(
         self, *, symbol: str, timeframe: str, period_years: int,
         progress: Callable[[int], None] | None = None,
@@ -208,35 +310,11 @@ class BinancePublicArchiveClient:
         for index, path in enumerate(paths):
             if cancelled and cancelled():
                 raise InterruptedError("Backtest cancellation requested")
-            try:
-                response = self.client.get(path)
-                response.raise_for_status()
-                checksum_response = self.client.get(path + ".CHECKSUM")
-                checksum_response.raise_for_status()
-            except httpx.HTTPError as exc:
-                raise BinanceArchiveError(
-                    f"Archive or SHA256 checksum unavailable: {BASE_URL}{path}"
-                ) from exc
-
-            checksum_text = checksum_response.text.strip().split()
-            if not checksum_text or not re.fullmatch(r"[0-9a-fA-F]{64}", checksum_text[0]):
-                raise BinanceArchiveError(f"Malformed checksum for {BASE_URL}{path}")
-            expected_hash = checksum_text[0].lower()
-            downloaded = response.content
-            actual_hash = sha256(downloaded).hexdigest()
-            if actual_hash != expected_hash:
-                raise BinanceArchiveError(f"SHA256 mismatch for {BASE_URL}{path}")
-
-            rows = _parse_zip(
-                downloaded, path.rsplit("/", 1)[-1].removesuffix(".zip") + ".csv",
-                cutoff_ms=cutoff_ms,
+            rows, metadata = self._read_verified_archive(
+                path, cutoff_ms=cutoff_ms
             )
             records.extend(rows)
-            provenance.append({
-                "url": BASE_URL + path,
-                "sha256": actual_hash,
-                "rows": len(rows),
-            })
+            provenance.append(metadata)
             if progress:
                 progress(int((index + 1) / max(1, len(paths)) * 100))
             delay = self.parameters.floating("market.request_delay_seconds")
@@ -257,10 +335,39 @@ class BinancePublicArchiveClient:
             cutoff_ms=cutoff_ms,
             maximum_rows=required_with_warmup,
         )
-        if len(frame) < required_with_warmup - 1:
+        expected = pd.date_range(
+            start=pd.Timestamp(start_ms, unit="ms", tz="UTC"),
+            periods=required_with_warmup,
+            freq=pd.Timedelta(milliseconds=interval_ms),
+        )
+        frame, supplemental, repair_attempts = self._repair_small_gaps_from_daily(
+            symbol=symbol,
+            interval=INTERVALS[timeframe],
+            frame=frame,
+            expected=expected,
+            cutoff_ms=cutoff_ms,
+            cancelled=cancelled,
+        )
+        provenance.extend(supplemental)
+        # Do not silently shorten the research period or overlook gaps.
+        present = pd.DatetimeIndex(pd.to_datetime(frame["timestamp"], utc=True))
+        missing = expected.difference(present)
+        unexpected = present.difference(expected)
+        if len(missing) or len(unexpected) or len(frame) != required_with_warmup:
+            missing_details = ", ".join(
+                timestamp.isoformat() for timestamp in missing[:12]
+            ) or "none"
+            unexpected_details = ", ".join(
+                timestamp.isoformat() for timestamp in unexpected[:5]
+            ) or "none"
+            repair_details = "; ".join(repair_attempts[:12]) or "no daily recovery needed"
             raise BinanceArchiveError(
-                f"Requested {required_with_warmup} {timeframe} candles, "
-                f"only {len(frame)} were recovered from Binance archives"
+                f"Binance archive has {len(missing)} missing or irregular "
+                f"{timeframe} candle intervals; requested {required_with_warmup}, "
+                f"recovered {len(frame)}. Missing UTC openings: {missing_details}. "
+                f"Unexpected UTC openings: {unexpected_details}. "
+                f"Verified daily recovery: {repair_details}. "
+                "No synthetic candles or cross-exchange substitution were used."
             )
         diffs = frame["timestamp"].diff().dropna().dt.total_seconds()
         if not diffs.eq(interval_seconds).all():
