@@ -429,6 +429,16 @@ def _run_optimization(strategy_id: str) -> None:
             )
         if winner is None:
             raise ValueError("Nenhum candidato LightGBM conseguiu ser treinado")
+        # Freeze ALL active learner parameters, not just the seven searched
+        # dimensions. Later DB edits must not silently change this champion.
+        winner["model_snapshot"] = {
+            **{
+                key: value for key, value in base.snapshot().items()
+                if key.startswith("lightgbm.") or key.startswith("forecast.regression_")
+            },
+            **winner["parameters"],
+        }
+        _update_strategy(strategy_id, champion_json=json.dumps(winner, allow_nan=False))
         summary = {
             "validation_kind": "INTERNAL_PRE_OOS_CHRONOLOGICAL",
             "oos_untouched_from": first_oos.isoformat(),
@@ -508,7 +518,7 @@ def execute_strategy(strategy_id: str) -> dict:
             raise ValueError("Esta estratégia já possui execução final")
         champion = json.loads(row.champion_json)
         source = row.source_job_id
-        overrides = champion["parameters"]
+        overrides = champion.get("model_snapshot") or champion["parameters"]
         # Source/model metadata are recorded by the actual job snapshot.
         created = create_strategy_job(source, overrides)
         row.execution_job_id = created["id"]
