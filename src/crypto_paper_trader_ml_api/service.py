@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from sqlalchemy import desc
 
+from .archive_replay import ArchivedMarketClient, compare_archives, inspect_source_archive
 from .database import MLBacktestAudit, MLBacktestJob, SessionLocal
 from .engine import run_ml_backtest
 from .mexc import TIMEFRAME_SECONDS
@@ -56,6 +57,7 @@ def _serialize_job(job: MLBacktestJob, include_result: bool = False) -> dict:
         "trend_timeframe": job.trend_timeframe,
         "period_years": job.period_years,
         "initial_capital": job.initial_capital,
+        "replay_parent_job_id": job.replay_parent_job_id,
         "error_message": job.error_message,
         "created_at": job.created_at,
         "started_at": job.started_at,
@@ -192,6 +194,61 @@ def create_job(request: MLBacktestCreate) -> dict:
     return _serialize_job(job)
 
 
+def create_replay_job(source_job_id: str) -> dict:
+    """Schedule a V2 comparison using a completed V1 audit already stored in DB.
+
+    No path, ZIP upload, shell command, or exchange request is required.
+    Feature/classification/fold parameters come from the archived snapshot.
+    New regression settings come from the current database, as configured
+    in the Front parameters panel.
+    """
+    current = get_runtime_parameters()
+    with SessionLocal() as session:
+        source = session.get(MLBacktestJob, source_job_id)
+        if source is None:
+            raise LookupError("Execução original não encontrada no banco da ML API")
+        if source.status != "COMPLETED":
+            raise ValueError("A execução original precisa estar concluída")
+        if source.replay_parent_job_id:
+            raise ValueError("Selecione uma execução original, não um replay anterior")
+        audit = session.get(MLBacktestAudit, source_job_id)
+        if audit is None:
+            raise ValueError(
+                "O ZIP original não está armazenado nesta ML API. "
+                "Selecione outra execução concluída com auditoria disponível."
+            )
+        request, original_snapshot = inspect_source_archive(audit.archive_zip)
+        active = session.query(MLBacktestJob).filter(
+            MLBacktestJob.replay_parent_job_id == source_job_id,
+            MLBacktestJob.status.in_(["QUEUED", "RUNNING"]),
+        ).order_by(desc(MLBacktestJob.created_at)).first()
+        if active is not None:
+            return _serialize_job(active)
+
+    # This completes missing V2 keys without replacing the original source,
+    # labels, classification settings or walk-forward fold boundaries.
+    snapshot = get_runtime_parameters_from_snapshot(original_snapshot).snapshot()
+    for key, value in current.snapshot().items():
+        if key.startswith("forecast.regression_") or key == "forecast.bootstrap_samples":
+            snapshot[key] = value
+    now = datetime.now(timezone.utc)
+    job = MLBacktestJob(
+        id=str(uuid4()), status="QUEUED", stage="Queued", progress=0,
+        replay_parent_job_id=source_job_id, symbol=request.symbol,
+        decision_timeframe=request.decision_timeframe,
+        trend_timeframe=request.trend_timeframe,
+        period_years=request.period_years, initial_capital=request.initial_capital,
+        request_json=request.model_dump_json(),
+        settings_snapshot_json=json.dumps(snapshot, separators=(",", ":")),
+        created_at=now,
+    )
+    with SessionLocal.begin() as session:
+        session.add(job)
+    with _submit_lock:
+        _get_executor(current).submit(_run_job, job.id)
+    return _serialize_job(job)
+
+
 def list_jobs(limit: int) -> list[dict]:
     with SessionLocal() as session:
         jobs = session.query(MLBacktestJob).order_by(desc(MLBacktestJob.created_at)).limit(limit).all()
@@ -265,15 +322,40 @@ def _run_job(job_id: str) -> None:
             if request.experiment_type == "BTC_DIRECTION_RETURN"
             else run_ml_backtest
         )
-        result = runner(
-            request,
-            parameters,
-            lambda value, stage: _update_progress(job_id, value, stage),
-            lambda: _is_cancelled(job_id),
-            audit_writer=archive_contents.append,
-        )
+        source_archive = None
+        archived_client = None
+        if job.replay_parent_job_id:
+            if request.experiment_type != "BTC_DIRECTION_RETURN":
+                raise ValueError("Replay V2 aceita apenas BTC Direction & Return")
+            with SessionLocal() as session:
+                source_record = session.get(MLBacktestAudit, job.replay_parent_job_id)
+                if source_record is None:
+                    raise ValueError("O ZIP da execução original não está mais disponível")
+                source_archive = source_record.archive_zip
+            archived_client = ArchivedMarketClient(source_archive, request)
+            progress_callback = lambda value, stage: _update_progress(job_id, value, stage)
+            result = run_direction_backtest(
+                request, parameters, progress_callback,
+                lambda: _is_cancelled(job_id),
+                audit_writer=archive_contents.append,
+                historical_client=archived_client,
+            )
+        else:
+            result = runner(
+                request,
+                parameters,
+                lambda value, stage: _update_progress(job_id, value, stage),
+                lambda: _is_cancelled(job_id),
+                audit_writer=archive_contents.append,
+            )
         if len(archive_contents) != 1:
             raise RuntimeError("No complete audit archive was generated for this backtest")
+        if source_archive is not None:
+            result["replay_comparison"] = compare_archives(
+                source_archive, archive_contents[0]
+            )
+            result["replay_comparison"]["source_job_id"] = job.replay_parent_job_id
+            result["execution"]["replay_parent_job_id"] = job.replay_parent_job_id
         with SessionLocal.begin() as session:
             job = session.get(MLBacktestJob, job_id)
             if not job:
