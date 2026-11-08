@@ -1,4 +1,4 @@
-"""Regression scale, real trained XGBoost splits and time-dependence diagnostics."""
+"""Regression scale, real trained LightGBM splits and time-dependence diagnostics."""
 
 from __future__ import annotations
 
@@ -37,7 +37,8 @@ def test_independent_scaled_regressor_learns_nonconstant_returns_without_changin
         "forecast.regression_reg_alpha": 0.0,
         "forecast.regression_reg_lambda": 1.0,
         "forecast.regression_early_stopping_rounds": 10,
-        "xgboost.n_jobs": 1,
+        "lightgbm.n_jobs": 1,
+        "lightgbm.min_child_samples": 5,
     })
     model = _regressor(train, validation, ["signal"], params)
     assert model is not None
@@ -68,7 +69,7 @@ def test_regression_can_be_constant_with_all_single_leaf_trees_and_diagnosed():
         "forecast.regression_gamma": 1000.0,
         "forecast.regression_reg_alpha": 0.0,
         "forecast.regression_target_scale": 1.0,
-        "xgboost.n_jobs": 1,
+        "lightgbm.n_jobs": 1,
     })
     model = _regressor(frame.iloc[:130], frame.iloc[130:], ["signal"], params)
     assert model is not None
