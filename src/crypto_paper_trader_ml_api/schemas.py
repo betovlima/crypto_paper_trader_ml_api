@@ -75,8 +75,7 @@ class MLBacktestJobDetail(MLBacktestJobResponse):
 
 
 class BTCCapitalizationRequest(BaseModel):
-    # 0 means a single strategy campaign jointly optimizing all three forecast horizons.
-    # 2/6/24 remain accepted for older clients and saved strategies.
+    # 0 means a single fused 2h+6h+24h BTC/CASH financial simulation.
     horizon_hours: Literal[0, 2, 6, 24] = 0
     initial_capital: float = Field(default=10000.0, gt=0, le=1000000000)
     fee_rate: float = Field(default=0.001, ge=0, le=0.05)
@@ -89,7 +88,9 @@ class BTCCapitalizationRequest(BaseModel):
 class MLResearchStrategyCreate(BaseModel):
     name: str = Field(min_length=3, max_length=120)
     source_job_id: str = Field(min_length=8, max_length=64)
-    horizon_hours: Literal[2, 6, 24] = 2
+    # A single research strategy now evaluates all three horizons. Explicit
+    # single-horizon requests remain valid for older saved experiments.
+    horizon_hours: Literal[0, 2, 6, 24] = 0
 
 
 class MLStrategyTuneRequest(BaseModel):
