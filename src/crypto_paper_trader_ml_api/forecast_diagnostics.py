@@ -13,12 +13,11 @@ from sklearn.metrics import brier_score_loss, mean_absolute_error, roc_auc_score
 
 
 def tree_diagnostics(model, predictions: np.ndarray) -> dict:
-    """Count split/leaf nodes among XGBoost trees actually used for predictions."""
+    """Report LightGBM tree structure using only the boosting rounds in use."""
     predictions = np.asarray(predictions, dtype=float)
-    distinct = int(np.unique(predictions).size)
     result = {
         "trained": model is not None,
-        "unique_predictions": distinct,
+        "unique_predictions": int(np.unique(predictions).size),
         "prediction_standard_deviation": float(np.std(predictions)),
         "prediction_min": float(np.min(predictions)),
         "prediction_max": float(np.max(predictions)),
@@ -32,34 +31,32 @@ def tree_diagnostics(model, predictions: np.ndarray) -> dict:
     }
     if model is None:
         return result
-    booster = model.get_booster()
-    dumps = booster.get_dump(dump_format="json")
+    booster = model.booster_
+    trees = booster.dump_model()["tree_info"]
+    best = getattr(model, "best_iteration_", 0) or booster.current_iteration()
+    used = min(len(trees), max(0, int(best)))
+    best_scores = getattr(model, "best_score_", {})
     try:
-        best_iteration = int(model.best_iteration)
-    except AttributeError:
-        best_iteration = len(dumps) - 1
-    try:
-        best_score = float(model.best_score)
-    except AttributeError:
+        best_score = next(iter(next(iter(best_scores.values())).values()))
+        best_score = float(best_score)
+    except (StopIteration, TypeError, AttributeError):
         best_score = None
-    used_count = min(len(dumps), best_iteration + 1)
     result.update({
-        "best_iteration": best_iteration,
+        "best_iteration": int(best) if best else None,
         "best_score": best_score,
-        "total_trees": len(dumps),
-        "used_trees": used_count,
+        "total_trees": len(trees),
+        "used_trees": used,
     })
 
     def count_nodes(node: dict) -> tuple[int, int]:
-        if "leaf" in node:
+        if "leaf_index" in node:
             return 0, 1
-        child_counts = [count_nodes(child) for child in node.get("children", [])]
-        return 1 + sum(item[0] for item in child_counts), sum(
-            item[1] for item in child_counts
-        )
+        children = ("left_child", "right_child")
+        counts = [count_nodes(node[child]) for child in children if child in node]
+        return 1 + sum(splits for splits, _ in counts), sum(leaves for _, leaves in counts)
 
-    for dump in dumps[:used_count]:
-        splits, leaves = count_nodes(json.loads(dump))
+    for tree in trees[:used]:
+        splits, leaves = count_nodes(tree["tree_structure"])
         result["split_nodes_used"] += splits
         result["leaf_nodes_used"] += leaves
         result["single_leaf_trees_used"] += int(splits == 0)
