@@ -754,6 +754,7 @@ def export_strategy_report(strategy_id: str) -> bytes:
                         fee_rate=float(request.get("fee_rate", 0.001)),
                         slippage_rate=float(request.get("slippage_rate", 0.0005)),
                         entry_edge=0.0, min_probability=0.5, exit_return=0.0,
+                        full_audit=True,
                         optimized_policy={
                             k: v for k, v in frozen.items() if k.startswith("policy.")
                         },
