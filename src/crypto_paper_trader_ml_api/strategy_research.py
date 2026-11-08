@@ -427,6 +427,11 @@ def _run_optimization(strategy_id: str) -> None:
                 trials_json=json.dumps(records, allow_nan=False),
                 champion_json=json.dumps(winner, allow_nan=False) if winner else None,
             )
+        with SessionLocal() as session:
+            current = session.get(MLResearchStrategy, strategy_id)
+            if current is not None and current.status == "CANCEL_REQUESTED":
+                _update_strategy(strategy_id, status="CANCELLED", error_message=None)
+                return
         if winner is None:
             raise ValueError("Nenhum candidato LightGBM conseguiu ser treinado")
         # Freeze ALL active learner parameters, not just the seven searched
