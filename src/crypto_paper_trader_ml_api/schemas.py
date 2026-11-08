@@ -83,6 +83,18 @@ class BTCCapitalizationRequest(BaseModel):
     min_probability: float = Field(default=0.5, ge=0, le=1)
     exit_return: float = Field(default=0, ge=-0.2, le=0.2)
 
+ 
+class MLResearchStrategyCreate(BaseModel):
+    name: str = Field(min_length=3, max_length=120)
+    source_job_id: str = Field(min_length=8, max_length=64)
+    horizon_hours: Literal[2, 6, 24] = 2
+
+
+class MLStrategyTuneRequest(BaseModel):
+    mode: Literal["QUICK", "BAYESIAN"]
+    trials: int = Field(default=8, ge=4, le=40)
+
+
 
 class HealthResponse(BaseModel):
     status: str
