@@ -69,6 +69,31 @@ def test_candidate_respects_lightgbm_depth_constraints_and_is_reproducible():
     assert np.all((a >= 0) & (a <= 1))
 
 
+def test_caro_adapted_gp_returns_bounded_candidate_with_risk_metrics():
+    rng = np.random.default_rng(42)
+    points = [rng.uniform(size=len(strategy_research.SPACE)) for _ in range(10)]
+    rows = []
+    for i in range(len(points)):
+        rows.append({
+            "status": "COMPLETED",
+            "metrics": {
+                "score": 0.03 * i,
+                "capital_final": 10000 + 50 * i,
+                "sharpe": 0.2 + .04 * i,
+                "max_drawdown": -0.13 + 0.002 * i,
+                "worst_fold_return": -0.05 + 0.005 * i,
+            },
+        })
+    point = _next_candidate(
+        10, "BAYESIAN", points, [v["metrics"]["score"] for v in rows],
+        qmc.LatinHypercube(d=len(strategy_research.SPACE), seed=42),
+        np.random.default_rng(42), rows,
+    )
+    assert len(point) == len(strategy_research.SPACE)
+    assert np.isfinite(point).all()
+    assert ((point >= 0) & (point <= 1)).all()
+
+
 def test_validation_strategy_executes_only_at_next_open():
     data = pd.DataFrame({
         "timestamp": pd.date_range("2024-01-01", periods=4, freq="30min", tz="UTC"),
@@ -85,6 +110,8 @@ def test_validation_strategy_executes_only_at_next_open():
     # Buying at the forecast candle close (100) would make 10%; the correct
     # fill occurs at the following candle OPEN (110) and breaks even.
     assert metrics["capital_final"] == pytest.approx(10000)
+    assert metrics["worst_fold_return"] == pytest.approx(0)
+    assert metrics["sharpe"] == pytest.approx(0)
 
 
 def test_single_api_supports_strategy_creation_and_bounded_tuning(monkeypatch):
