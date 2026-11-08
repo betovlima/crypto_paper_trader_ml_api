@@ -90,7 +90,12 @@ def test_portfolio_simulator_returns_exact_positions_and_end_to_end_trace():
         "entry_label": [1, 0, 0, 0, 1],
         "exit_label": [0, 0, 1, 0, 0],
     })
-    params = default_parameters()
+    params = default_parameters(**{
+        "simulation.initial_stop_atr": 100.0,
+        "simulation.initial_target_atr": 100.0,
+        "simulation.trailing_stop_atr": 100.0,
+        "simulation.minimum_trend_gap": 0.0,
+    })
     request = _request()
     sim = simulate_portfolio(frame, request, params)
     rows = sim["rotation_rows"]
@@ -109,3 +114,26 @@ def test_portfolio_simulator_returns_exact_positions_and_end_to_end_trace():
     assert result["rotation_timeline"][-1]["position"] == "CASH"
     assert "distance_to_peak" in result["rotation_timeline"][0]
     assert set(result["equity_curve"][0]) == {"timestamp", "equity", "buy_hold"}
+
+def test_terminal_liquidation_is_reflected_in_final_position_and_actions():
+    frame = pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=4, freq="30min", tz="UTC"),
+        "open": [100.0] * 4, "high": [100.1] * 4,
+        "low": [99.9] * 4, "close": [100.0] * 4,
+        "atr_14": [1.0] * 4, "ema_21": [101.0] * 4,
+        "ema_50": [99.0] * 4, "trend_ema_gap": [0.01] * 4,
+        "entry_probability": [0.9, 0.1, 0.1, 0.1],
+        "exit_probability": [0.1, 0.1, 0.1, 0.1],
+    })
+    params = default_parameters(**{
+        "simulation.initial_stop_atr": 100.0,
+        "simulation.initial_target_atr": 100.0,
+        "simulation.trailing_stop_atr": 100.0,
+        "simulation.minimum_trend_gap": 0.0,
+    })
+    simulated = simulate_portfolio(frame, _request(), params)
+    last = simulated["rotation_rows"][-1]
+    assert last["position"] == "CASH"
+    assert last["actions"][-1]["action"] == "SELL"
+    assert last["actions"][-1]["reason"] == "END_OF_TEST"
+    assert last["equity"] == simulated["equity_curve"][-1]["equity"]
