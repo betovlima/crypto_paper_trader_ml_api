@@ -60,6 +60,40 @@ def test_stop_fills_next_open_not_unavailable_intrabar_price():
     assert result["capital_final"] == pytest.approx(8600)
 
 
+
+def test_protective_stop_works_without_new_model_predictions():
+    candles = _candles([(100, 100), (100, 100), (98, 90),
+                        (83, 83), (83, 83)])
+    policy = {**DEFAULT_POLICY, "policy.stop_loss": .05,
+              "policy.trailing_stop": .3, "policy.take_profit": .3,
+              "policy.cooldown_bars": 10}
+    result = simulate_rotations(
+        candles, {1: _signal(1), 4: _signal(4, probability=.3)},
+        policy, fee=0, slippage=0,
+    )
+    assert result["completed_cycles"] == 1
+    assert result["actions"][1]["reason"] == "STOP_LOSS"
+    assert result["actions"][1]["signal_at"] is None
+    assert result["actions"][1]["price"] == 83
+    assert result["capital_final"] == pytest.approx(8300)
+
+
+def test_full_audit_keeps_every_equity_candle():
+    candles = _candles([(100, 100)] * 1003)
+    signals = {i: _signal(i, value=-.01, probability=.3)
+               for i in range(1, len(candles))}
+    full = simulate_rotations(
+        candles, signals, DEFAULT_POLICY, timeline_limit=None,
+    )
+    short = simulate_rotations(
+        candles, signals, DEFAULT_POLICY, timeline_limit=500,
+    )
+    assert len(full["timeline"]) == 1002
+    assert len(short["timeline"]) <= 501
+    assert full["capital_final"] == short["capital_final"] == 10000
+
+
+
 def test_reentry_cooldown_and_single_operation_per_candle():
     candles = _candles([(100, 100), (100, 100), (110, 110),
                         (111, 111), (111, 111), (111, 111), (112, 112)])
