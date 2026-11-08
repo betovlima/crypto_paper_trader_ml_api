@@ -66,7 +66,7 @@ class MLResearchStrategy(Base):
     source_job_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("ml_backtest_jobs.id"), nullable=False, index=True
     )
-    horizon_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    horizon_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="DRAFT")
     mode: Mapped[str | None] = mapped_column(String(24), nullable=True)
     progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
