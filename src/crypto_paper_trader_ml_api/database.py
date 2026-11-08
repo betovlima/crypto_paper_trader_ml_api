@@ -159,6 +159,14 @@ def initialize_database() -> None:
             job.error_message = "The ML API restarted before this backtest completed."
             job.completed_at = now
 
+        interrupted_tuning = session.query(MLResearchStrategy).filter(
+            MLResearchStrategy.status.in_(["RUNNING", "CANCEL_REQUESTED"])
+        )
+        for strategy in interrupted_tuning:
+            strategy.status = "FAILED"
+            strategy.error_message = "A ML API reiniciou antes de concluir a otimização."
+            strategy.updated_at = now
+
 
 def session_scope() -> Iterator[Session]:
     session = SessionLocal()
