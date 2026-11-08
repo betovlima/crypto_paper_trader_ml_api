@@ -496,6 +496,74 @@ def _entry_diagnostics(joint_signals: dict, cfg: dict, fee: float, slippage: flo
 
 
 
+
+def _forecast_realization_diagnostics(
+    candles: list[dict], signals: dict[int, dict], policy: dict,
+    fee: float, slippage: float, bar_seconds: int,
+) -> dict:
+    """Compare predicted 6-hour equivalent return against observed 6-hour return.
+
+    This is a historical SELECTION-WINDOW diagnostic, not a forecast feature
+    and never an input to the live or final OOS decision logic. The last
+    12-candle future path must be fully inside the pre-OOS scoring dataset.
+    """
+    if bar_seconds != 1800:
+        horizon_bars = round(6 * 3600 / bar_seconds)
+    else:
+        horizon_bars = 12
+    cfg = validate_policy(policy)
+    predicted, realized, eligible = [], [], []
+    initial_fee = (
+        AlpacaFeeLedger(
+            cfg["policy.alpaca_liquidity"],
+            cfg["policy.alpaca_initial_30d_volume_usd"]
+        ).quote(candles[0]["timestamp"])["rate"]
+        if cfg.get("policy.fee_model") == ALPACA_FEE_MODEL else fee
+    )
+    hurdle = round_trip_cost(initial_fee, initial_fee, slippage) + cfg["policy.entry_edge"]
+    for i, signal in signals.items():
+        stop = i + horizon_bars - 1
+        if i < 1 or stop >= len(candles):
+            continue
+        if (candles[stop]["timestamp"] - candles[i - 1]["timestamp"]).total_seconds() != horizon_bars * bar_seconds:
+            continue
+        first_close = float(candles[i - 1]["close"])
+        last_close = float(candles[stop]["close"])
+        if first_close <= 0 or last_close <= 0:
+            continue
+        prediction = float(signal["predicted_return"])
+        outcome = last_close / first_close - 1
+        predicted.append(prediction)
+        realized.append(outcome)
+        eligible.append(
+            signal["positive_votes"] >= cfg["policy.min_positive_votes"]
+            and signal["p_up"] >= cfg["policy.entry_probability"]
+            and prediction > hurdle
+        )
+    if not predicted:
+        return {"rows": 0, "horizon_hours": 6, "note": "Não há caminhos futuros completos dentro da validação pré-OOS"}
+    p, y, mask = np.asarray(predicted), np.asarray(realized), np.asarray(eligible)
+    correlation = (
+        float(np.corrcoef(p, y)[0, 1]) if len(p) >= 3
+        and np.std(p) > 1e-12 and np.std(y) > 1e-12 else None
+    )
+    return {
+        "rows": len(p), "horizon_hours": 6,
+        "mean_predicted_return": float(np.mean(p)),
+        "mean_realized_return": float(np.mean(y)),
+        "mean_prediction_bias": float(np.mean(p - y)),
+        "return_mae": float(np.mean(np.abs(p - y))),
+        "return_correlation": correlation,
+        "direction_accuracy": float(np.mean((p > 0) == (y > 0))),
+        "entry_eligible_rows": int(np.count_nonzero(mask)),
+        "entry_eligible_mean_predicted_return": float(np.mean(p[mask])) if np.any(mask) else None,
+        "entry_eligible_mean_realized_return": float(np.mean(y[mask])) if np.any(mask) else None,
+        "note": "Descritivo: retorno 6h real só é observado após a previsão e nunca participa dos sinais.",
+    }
+
+
+
+
 def _combine_horizon_metrics(
     results: dict[str, dict],
     *, scoring: pd.DataFrame | None = None, policy: dict | None = None,
@@ -531,6 +599,9 @@ def _combine_horizon_metrics(
         signals_by_horizon[h] = horizon_signals
     joint_signals = aggregate_signals(signals_by_horizon, cfg)
     diagnostics = _entry_diagnostics(joint_signals, cfg, fee, slippage)
+    forecast_quality = _forecast_realization_diagnostics(
+        candles, joint_signals, cfg, fee, slippage, bar_seconds,
+    )
     simulated = simulate_rotations(
         candles, joint_signals, cfg, initial_capital=10000,
         fee=fee, slippage=slippage, bar_seconds=bar_seconds,
@@ -568,6 +639,7 @@ def _combine_horizon_metrics(
         "stress_score": float(stressed_score),
         "score_method": "joint_compounded_capital_risk_adjusted_v9_stress_min",
         "robustness": robustness,
+        "forecast_realization_diagnostics": forecast_quality,
         "stress_capital_final": stressed["capital_final"],
         "stress_net_profit_usd": stressed["net_profit_usd"],
         "stress_fees_paid": stressed["fees_paid"],
