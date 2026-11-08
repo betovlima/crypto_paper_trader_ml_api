@@ -23,7 +23,7 @@ from .schemas import (
 from .service import cancel_job, capitalize_replay_job, create_job, create_replay_job, get_audit_zip, get_job, list_jobs
 from .strategy_research import (
     create_strategy, get_strategy, list_strategies, start_optimization,
-    execute_strategy, export_strategy_report,
+    execute_strategy, export_strategy_report, cancel_optimization,
 )
 from .settings_service import (
     ParameterValidationError,
@@ -114,6 +114,16 @@ def ml_strategy_detail(strategy_id: str) -> dict:
 def ml_optimize_strategy(strategy_id: str, payload: MLStrategyTuneRequest) -> dict:
     try:
         return start_optimization(strategy_id, **payload.model_dump())
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.delete("/v1/ml-strategies/{strategy_id}/optimization")
+def ml_cancel_optimization(strategy_id: str) -> dict:
+    try:
+        return cancel_optimization(strategy_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
