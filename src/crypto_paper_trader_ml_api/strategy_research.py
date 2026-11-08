@@ -767,6 +767,15 @@ def execute_strategy(strategy_id: str) -> dict:
         if row.execution_job_id:
             raise ValueError("Esta estratégia já possui execução final")
         champion = json.loads(row.champion_json)
+        if (
+            row.horizon_hours == 0
+            and champion.get("metrics", {}).get("completed_cycles") == 0
+        ):
+            raise ValueError(
+                "Esta campanha terminou sem compras BTC/CASH. "
+                "Não existe política de capitalização válida para executar OOS. "
+                "Inicie uma nova campanha e confira os filtros de entrada."
+            )
         source = row.source_job_id
         overrides = champion.get("model_snapshot") or champion["parameters"]
         # Source/model metadata are recorded by the actual job snapshot.
