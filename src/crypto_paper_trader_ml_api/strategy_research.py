@@ -32,6 +32,7 @@ from .settings_service import get_runtime_parameters, get_runtime_parameters_fro
 from .engine import ProbabilityCalibrator
 from .btc_policy import DEFAULT_POLICY, aggregate_signals, simulate_rotations, validate_policy
 from .alpaca_fees import ALPACA_FEE_MODEL, AlpacaFeeLedger, round_trip_cost
+from .frozen_cost_replay import replay_frozen_rotations
 from .selection_robustness import (
     assess_robustness, STRESS_FEE_MULTIPLIER, STRESS_SLIPPAGE_MULTIPLIER,
     MIN_COMPLETED_CYCLES, MIN_ACTIVE_SEGMENTS, MIN_PROFITABLE_SEGMENTS,
@@ -605,13 +606,20 @@ def _combine_horizon_metrics(
     simulated = simulate_rotations(
         candles, joint_signals, cfg, initial_capital=10000,
         fee=fee, slippage=slippage, bar_seconds=bar_seconds,
+        # Cost-stress needs the COMPLETE pre-OOS fill schedule, not the 200
+        # recent trades kept by the normal user-facing audit.
+        audit_limit=2 * len(candles),
     )
-    # Out-of-sample candles are never loaded here. Stress the SAME held-out
-    # pre-OOS scoring window with cost uncertainty known in advance.
-    stressed = simulate_rotations(
-        candles, joint_signals, cfg, initial_capital=10000,
-        fee=fee, slippage=min(.05, slippage * STRESS_SLIPPAGE_MULTIPLIER),
-        bar_seconds=bar_seconds, fee_multiplier=STRESS_FEE_MULTIPLIER,
+    if simulated["actions_truncated"]:
+        raise ValueError("Agenda de operações incompleta: impossível testar os mesmos negócios")
+    # Replay at the identical fills without reconsidering the entry hurdle.
+    # A stressed policy that simply stays in CASH is NOT robustness.
+    stressed = replay_frozen_rotations(
+        candles, joint_signals, simulated["actions"], cfg,
+        initial_capital=10000, fee=fee,
+        slippage=min(.05, slippage * STRESS_SLIPPAGE_MULTIPLIER),
+        fee_multiplier=STRESS_FEE_MULTIPLIER,
+        bar_seconds=bar_seconds,
     )
     robustness = assess_robustness(simulated, stressed)
     capital = simulated["capital_final"]
@@ -644,6 +652,9 @@ def _combine_horizon_metrics(
         "stress_net_profit_usd": stressed["net_profit_usd"],
         "stress_fees_paid": stressed["fees_paid"],
         "stress_slippage_usd_estimate": stressed["slippage_usd_estimate"],
+        "stress_same_trade_count": stressed["completed_cycles"],
+        "stress_same_trade_schedule": stressed["same_trade_schedule"],
+        "stress_method": stressed["stress_method"],
         "segment_cycle_counts": simulated["segment_cycle_counts"],
         "segment_returns": simulated["segment_returns"],
         "average_winning_cycle_usd": simulated["average_winning_cycle_usd"],
