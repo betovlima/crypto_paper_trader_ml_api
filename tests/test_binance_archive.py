@@ -23,6 +23,7 @@ from crypto_paper_trader_ml_api.binance_archive import (
     BinancePublicArchiveClient,
     _archive_paths,
     _parse_zip,
+    _filter_closed_window,
 )
 from crypto_paper_trader_ml_api.schemas import MLBacktestCreate
 
@@ -217,3 +218,29 @@ def test_explicit_history_source_is_persisted_in_resolved_job_configuration():
     assert chosen.model_dump()["history_source"] == "BINANCE_SPOT_ARCHIVE"
     legacy = _resolve_request(MLBacktestCreate(symbol="BTCUSDT"), default_parameters())
     assert legacy.history_source == "MEXC"
+
+
+@pytest.mark.parametrize("precision", ["ns", "us"])
+def test_closed_window_filters_utc_candles_with_both_pandas_precisions(precision):
+    start = pd.Timestamp("2026-01-01T00:00:00Z")
+    cutoff = pd.Timestamp("2026-01-03T00:00:00Z")
+    timestamps = pd.date_range("2025-12-31", periods=4, freq="1D", tz="UTC").as_unit(precision)
+    closes = [
+        int((time + pd.Timedelta(days=1)).timestamp() * 1000) - 1
+        for time in timestamps
+    ]
+    frame = pd.DataFrame({
+        "timestamp": timestamps,
+        "close_time_ms": closes,
+        "close": [99.0, 100.0, 101.0, 102.0],
+    })
+    assert str(frame["timestamp"].dtype).startswith("datetime64[" + precision)
+    filtered = _filter_closed_window(
+        frame,
+        start_ms=int(start.timestamp() * 1000),
+        cutoff_ms=int(cutoff.timestamp() * 1000),
+        maximum_rows=10,
+    )
+    assert filtered["close"].tolist() == [100.0, 101.0]
+    assert filtered["timestamp"].iloc[0] == start
+    assert filtered["timestamp"].iloc[-1] == pd.Timestamp("2026-01-02T00:00:00Z")
