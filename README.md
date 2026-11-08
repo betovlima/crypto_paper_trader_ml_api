@@ -2,6 +2,52 @@
 
 Independent API for long-period LightGBM walk-forward backtests. It is separate from the paper-trading API and never sends real orders.
 
+## BTC/CASH V9: evidence-based selection before OOS
+
+The same **three buttons** (Create, Optimize-and-Run, Export) remain at the
+top of the front end; no external scripts or new configuration files.
+
+V9 prevents the one-trade-winner problem exposed by V8. Every new joint
+2h+6h+24h research candidate now requires, **on PRE-OOS data only**:
+
+* At least **6 completed BTC/CASH cycles**, across at least 2 of 3
+  consecutive validation time segments (minimum 2 cycles per active segment).
+* At least 2 validation segments with positive mark-to-market returns
+  and positive overall net profit after Alpaca fees/slippage.
+* Average positive cycle gain at least 75% of the absolute average losing
+  cycle; the largest winning trade cannot contribute more than 70% of total
+  positive cycle gains. These are evidence thresholds, not trade targets.
+* Positive profit in a separate cost stress simulation with the **same
+  pre-OOS candles and forecasts** but 25% greater Alpaca commissions and
+  2x slippage. These increases are hypothetical robustness checks,
+  **not published Alpaca tariffs**.
+* Ranking candidates by the lower of baseline and stressed risk-adjusted
+  compound capital scores. Fees use the same official dynamic Alpaca
+  30-day volume tier algorithm on both paths.
+
+Candidates failing a check are marked \`INSUFFICIENT_EVIDENCE\`. If no
+candidate survives, there is NO champion and NO automatic final OOS job.
+All failed checks, segment counts/returns, fee-stress capital, average gains
+and losses, and trade concentration are retained in the strategy ZIP and
+inside the collapsible research diagnostics.
+
+For diagnostic purposes the model's weighted forecast (converted to a
+6-hour equivalent return) is compared with the subsequent realized 6-hour
+return **only within the pre-OOS selection partition**. These realized
+outcomes never become prediction inputs, trade signals, or calibration
+features.
+
+Thresholds were fixed prior to running V9 candidates. They are deliberately
+conservative and may reject all eight standard configurations. This is
+preferable to labeling an isolated profitable trade a validated strategy.
+
+**Scientific caveat:** prior versions' OOS outcomes (including V8) have
+already been inspected by the researchers. Although the V9 automatic
+optimizer cannot read the OOS data when selecting a candidate, using the
+SAME historic OOS after this research iteration cannot establish genuinely
+independent external generalization. New future samples or a newly reserved
+untouched period are needed for that stronger claim.
+
 ## BTC/CASH V8: Alpaca Crypto trading fees and net reinvested profit
 
 The **new** LightGBM BTC/CASH research campaigns model the published
