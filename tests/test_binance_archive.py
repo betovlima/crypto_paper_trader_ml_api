@@ -51,7 +51,7 @@ def _candle(start, *, microseconds=False, price=100.0):
     ]
 
 
-def _server(*, gap_day=None, corrupt=False, missing=False):
+def _server(*, gap_day=None, monthly_gap_day=None, corrupt=False, missing=False):
     hits = []
 
     def handle(req):
@@ -75,6 +75,8 @@ def _server(*, gap_day=None, corrupt=False, missing=False):
             ]
         if gap_day is not None:
             dates = [d for d in dates if d.date().isoformat() != gap_day]
+        if monthly_gap_day is not None and not is_daily:
+            dates = [d for d in dates if d.date().isoformat() != monthly_gap_day]
         rows = [_candle(d, microseconds=d.year >= 2025) for d in dates]
         binary = _make_archive(name + ".csv", rows)
         digest = sha256(binary).hexdigest()
@@ -175,8 +177,10 @@ def test_missing_interior_candle_is_not_interpolated():
     transport, _ = _server(gap_day="2026-06-14")
     client = _client(transport)
     try:
-        with pytest.raises(BinanceArchiveError, match="missing or irregular"):
+        with pytest.raises(BinanceArchiveError, match="missing or irregular") as caught:
             client.fetch_history(symbol="BTCUSDT", timeframe="1day", period_years=1)
+        assert "2026-06-14T00:00:00+00:00" in str(caught.value)
+        assert "No synthetic candles" in str(caught.value)
     finally:
         client.close()
 
@@ -244,3 +248,28 @@ def test_closed_window_filters_utc_candles_with_both_pandas_precisions(precision
     assert filtered["close"].tolist() == [100.0, 101.0]
     assert filtered["timestamp"].iloc[0] == start
     assert filtered["timestamp"].iloc[-1] == pd.Timestamp("2026-01-02T00:00:00Z")
+
+
+def test_monthly_gap_can_be_recovered_only_from_verified_binance_daily_archive():
+    transport, hits = _server(monthly_gap_day="2026-06-14")
+    client = _client(transport)
+    try:
+        frame = client.fetch_history(
+            symbol="BTCUSDT", timeframe="1day", period_years=1
+        )
+    finally:
+        client.close()
+    assert len(frame) == 366
+    assert frame["timestamp"].is_unique
+    assert (
+        frame["timestamp"].diff().dropna() == pd.Timedelta(days=1)
+    ).all()
+    repaired = [
+        item for item in client.archive_manifest["1day"]
+        if item.get("role") == "VERIFIED_DAILY_GAP_REPAIR"
+    ]
+    assert len(repaired) == 1
+    assert repaired[0]["recovered_candles"] == 1
+    assert repaired[0]["url"].endswith("BTCUSDT-1d-2026-06-14.zip")
+    assert len(repaired[0]["sha256"]) == 64
+    assert any(path.endswith("/BTCUSDT-1d-2026-06-14.zip.CHECKSUM") for path in hits)
