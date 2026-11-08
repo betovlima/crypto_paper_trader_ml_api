@@ -1,6 +1,19 @@
 # Crypto Paper Trader ML API
 
-Independent API for long-period XGBoost walk-forward backtests. It is separate from the paper-trading API and never sends real orders.
+Independent API for long-period LightGBM walk-forward backtests. It is separate from the paper-trading API and never sends real orders.
+
+## LightGBM replacement (V3 research)
+
+The classification and regression learners now use LightGBM 4.6.x, including
+both BTC Direction & Return and the legacy target/stop backtest. Old jobs and
+audit ZIPs are **not rewritten or relabelled**. New backtests have immutable
+LightGBM parameter snapshots; old XGBoost-specific keys stay in the database
+for history but are hidden in the parameters UI.
+
+The LightGBM section exposes num_leaves, min_child_samples, max_bin,
+sampling frequency, regularization and boosting settings. Regression has
+independent num_leaves and min_child_samples. New forecasts must be trained
+again: swapping an existing replay ZIP does not convert its saved predictions.
 
 ## Version 0.2.2 — database-backed Railway CORS and explicit-window pagination
 
@@ -17,7 +30,7 @@ Every operational parameter is persisted in `ml_runtime_parameters` and loaded f
 - capital, fees, slippage and probability thresholds;
 - feature-engineering periods and Fibonacci levels;
 - entry and exit label rules;
-- XGBoost hyperparameters and calibration;
+- LightGBM hyperparameters and calibration;
 - walk-forward windows and fold limits;
 - stops, targets, trailing rules and reporting limits.
 
