@@ -28,7 +28,7 @@ DEFAULT_POLICY = {
     "policy.weight_2h": 0.4,
     "policy.weight_6h": 0.4,
     "policy.weight_24h": 0.2,
-    "policy.fee_model": ALPACA_FEE_MODEL,
+    "policy.fee_model": "FIXED",  # immutable V7 snapshots remain on original fee model
     "policy.alpaca_liquidity": "TAKER",
     "policy.alpaca_initial_30d_volume_usd": 0.0,
 }
