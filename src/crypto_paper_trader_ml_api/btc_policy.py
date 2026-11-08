@@ -10,6 +10,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import math
 
+from .alpaca_fees import ALPACA_FEE_MODEL, AlpacaFeeLedger, round_trip_cost
+
 HORIZONS = (2, 6, 24)
 DEFAULT_POLICY = {
     "policy.enabled": True,
@@ -26,6 +28,9 @@ DEFAULT_POLICY = {
     "policy.weight_2h": 0.4,
     "policy.weight_6h": 0.4,
     "policy.weight_24h": 0.2,
+    "policy.fee_model": ALPACA_FEE_MODEL,
+    "policy.alpaca_liquidity": "TAKER",
+    "policy.alpaca_initial_30d_volume_usd": 0.0,
 }
 
 
@@ -58,6 +63,14 @@ def validate_policy(values: dict) -> dict:
             policy[key] = number
     if policy["policy.exit_probability"] >= policy["policy.entry_probability"]:
         raise ValueError("A saída precisa exigir probabilidade menor que a entrada (histerese)")
+    if policy["policy.fee_model"] not in {"FIXED", ALPACA_FEE_MODEL}:
+        raise ValueError("Modelo de taxas inválido")
+    if policy["policy.alpaca_liquidity"] not in {"MAKER", "TAKER"}:
+        raise ValueError("Execução Alpaca deve ser MAKER ou TAKER")
+    initial_volume = float(policy["policy.alpaca_initial_30d_volume_usd"])
+    if not math.isfinite(initial_volume) or initial_volume < 0:
+        raise ValueError("Volume inicial de 30 dias inválido")
+    policy["policy.alpaca_initial_30d_volume_usd"] = initial_volume
     policy["policy.enabled"] = True
     return policy
 
@@ -118,9 +131,22 @@ def simulate_rotations(
     label: str = "LIGHTGBM_ROTATION",
     audit_limit: int = 200,
     timeline_limit: int | None = 500,
+    fee_model: str | None = None,
+    alpaca_liquidity: str | None = None,
+    alpaca_initial_30d_volume_usd: float | None = None,
 ) -> dict:
     """Signal at prior close -> fill at next open, at most one trade per candle."""
     cfg = validate_policy(policy)
+    fee_model = fee_model or cfg["policy.fee_model"]
+    alpaca_liquidity = alpaca_liquidity or cfg["policy.alpaca_liquidity"]
+    start_volume = (
+        cfg["policy.alpaca_initial_30d_volume_usd"]
+        if alpaca_initial_30d_volume_usd is None
+        else alpaca_initial_30d_volume_usd
+    )
+    if fee_model not in {"FIXED", ALPACA_FEE_MODEL}:
+        raise ValueError("Modelo de custos BTC/CASH inválido")
+    ledger = AlpacaFeeLedger(alpaca_liquidity, start_volume) if fee_model == ALPACA_FEE_MODEL else None
     if not (initial_capital > 0 and math.isfinite(initial_capital)):
         raise ValueError("Capital inicial inválido")
     if not (0 <= fee <= .05 and 0 <= slippage <= .05):
@@ -147,26 +173,48 @@ def simulate_rotations(
     exposure, cycles, wins, losses, fees_paid = 0, 0, 0, 0, 0.0
     gross_wins, gross_losses = 0.0, 0.0
     actions, points, equity_values = [], [], []
-    rt_cost = (1 + slippage) / ((1 - fee)**2 * (1 - slippage)) - 1
+    initial_fee = ledger.quote(_timestamp(candles[first]["timestamp"]))["rate"] if ledger else fee
+    rt_cost = round_trip_cost(initial_fee, initial_fee, slippage)
+    gross_profit_before_costs = 0.0
+    slippage_paid = 0.0
+    buy_reference_price = 0.0
     last_exec_index = -1
     cycle_cost = 0.0
 
     def perform(side: str, price: float, at: datetime, index: int, reason: str, signal: dict | None):
         nonlocal cash, btc, entry_price, peak_close, position_start, last_sale_index
         nonlocal cycles, wins, losses, gross_wins, gross_losses, fees_paid, cycle_cost
+        nonlocal gross_profit_before_costs, slippage_paid, buy_reference_price
+        quote = ledger.quote(at) if ledger else {
+            "rate": fee, "tier": None, "volume_30d_usd": None,
+            "liquidity": "FIXED", "tier_cutoff_at": None,
+        }
+        applied_fee = quote["rate"]
         if side == "BUY":
             gross = cash
-            cost = gross * fee
+            cost = gross * applied_fee
             btc = (gross - cost) / (price * (1 + slippage))
             fees_paid += cost
+            slippage_cost = gross * slippage / (1 + slippage)
+            slippage_paid += slippage_cost
+            buy_reference_price = price
+            filled_notional = gross
+            fee_asset = "BTC"
+            fee_amount_asset = gross / (price * (1 + slippage)) * applied_fee
             cash = 0.0
             entry_price, peak_close, position_start = price, price, index
             cycle_cost = gross
         else:
             gross = btc * price * (1 - slippage)
-            cost = gross * fee
+            cost = gross * applied_fee
             cash = gross - cost
             fees_paid += cost
+            slippage_cost = btc * price * slippage
+            slippage_paid += slippage_cost
+            gross_profit_before_costs += cycle_cost * (price / buy_reference_price - 1)
+            filled_notional = gross
+            fee_asset = "USD"
+            fee_amount_asset = cost
             btc = 0.0
             last_sale_index = index
             cycles += 1
@@ -181,12 +229,21 @@ def simulate_rotations(
             position_start = -1
         actions.append({
             "timestamp": at.isoformat(), "action": side, "reason": reason,
+            "fee_model": fee_model, "fee_rate": applied_fee,
+            "fee_tier": quote["tier"], "liquidity": quote["liquidity"],
+            "fee_30d_volume_usd": quote["volume_30d_usd"],
+            "fee_tier_cutoff_at": quote["tier_cutoff_at"],
+            "fee_asset": fee_asset, "fee_asset_amount": fee_amount_asset,
+            "fee_usd_equivalent": cost, "slippage_usd_estimate": slippage_cost,
+            "executed_notional_usd": filled_notional,
             "price": price, "capital_after": cash + btc * price,
             "predicted_return": signal["predicted_return"] if signal else None,
             "probability_up": signal["p_up"] if signal else None,
             "positive_votes": signal.get("positive_votes") if signal else None,
             "signal_at": signal["signal_at"] if signal else None,
         })
+        if ledger is not None:
+            ledger.record(at, filled_notional)
 
     for index in range(first, last + 1):
         candle = candles[index]
@@ -207,12 +264,14 @@ def simulate_rotations(
             estimate = float(signal["predicted_return"]) if signal else None
             votes = int(signal.get("positive_votes", 3)) if signal else None
             if btc == 0:
+                current_fee = ledger.quote(current_time)["rate"] if ledger else fee
+                current_round_trip = round_trip_cost(current_fee, current_fee, slippage)
                 if (
                     signal is not None
                     and index - last_sale_index > cfg["policy.cooldown_bars"]
                     and votes >= cfg["policy.min_positive_votes"]
                     and p >= cfg["policy.entry_probability"]
-                    and estimate > rt_cost + cfg["policy.entry_edge"]
+                    and estimate > current_round_trip + cfg["policy.entry_edge"]
                 ):
                     perform("BUY", price_open, current_time, index, "MODEL_ENTRY", signal)
                     last_exec_index = index
@@ -293,6 +352,15 @@ def simulate_rotations(
         "win_rate": wins / cycles if cycles else 0.0,
         "profit_factor": gross_wins / gross_losses if gross_losses > 0 else None,
         "fees_paid": float(fees_paid),
+        "alpaca_fees_usd": float(fees_paid) if ledger else None,
+        "slippage_usd_estimate": float(slippage_paid),
+        "net_profit_usd": float(cash - initial_capital),
+        "gross_profit_before_costs_usd": float(gross_profit_before_costs),
+        "fee_model": fee_model,
+        "alpaca_liquidity": alpaca_liquidity if ledger else None,
+        "alpaca_initial_30d_volume_usd": start_volume if ledger else None,
+        "fee_tier_history": sorted({(a["fee_tier"], a["fee_rate"]) for a in actions if a["fee_tier"] is not None}),
+        "fee_rate_used_first": initial_fee,
         "timeline": sampled,
         "actions": actions[-audit_limit:],
         "action_count": len(actions),
