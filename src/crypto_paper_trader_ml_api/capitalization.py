@@ -94,6 +94,46 @@ def _signals(archive: bytes, horizon: int, candles: list[dict], seconds: int) ->
     return signals
 
 
+def _joint_signals(signals_by_horizon: dict[int, dict]) -> dict:
+    """One causal BTC/CASH signal from 2h/6h/24h OOS predictions.
+
+    Only indices for which ALL horizons are available are eligible. Normalize
+    predicted returns to hourly rates before combining them into a six-hour
+    reference return. Never use future realized targets or candle closes.
+    """
+    horizons = (2, 6, 24)
+    if any(not signals_by_horizon.get(h) for h in horizons):
+        raise ValueError("Auditoria não contém previsões executáveis nos três horizontes")
+    common = set.intersection(
+        *(set(signals_by_horizon[h]) for h in horizons)
+    )
+    if len(common) < 2:
+        raise ValueError("Não há pelo menos dois candles com previsões OOS simultâneas para 2h, 6h e 24h")
+    output = {}
+    for index in sorted(common):
+        parts = [signals_by_horizon[h][index] for h in horizons]
+        timestamps = {part["signal_at"] for part in parts}
+        if len(timestamps) != 1:
+            raise ValueError("Horários de decisão divergentes entre os horizontes")
+        hourly_returns = [
+            part["predicted_return"] / float(h)
+            for h, part in zip(horizons, parts, strict=True)
+        ]
+        votes = sum(
+            part["predicted_return"] > 0 and part["p_up"] >= 0.5
+            for part in parts
+        )
+        output[index] = {
+            "predicted_return": sum(hourly_returns) / 3.0 * 6.0,
+            "p_up": sum(part["p_up"] for part in parts) / 3.0,
+            "signal_at": parts[0]["signal_at"],
+            "positive_votes": votes,
+            "horizons_hours": list(horizons),
+        }
+    return output
+
+
+
 def _summary_series(
     candles: list[dict], signals: dict, *, start: int, end: int,
     capital: float, fee: float, slippage: float, edge: float,
@@ -139,11 +179,13 @@ def _summary_series(
             if quantity == 0 and (
                 signal["predicted_return"] > round_trip + edge
                 and signal["p_up"] >= min_probability
+                and signal.get("positive_votes", 3) >= 2
             ):
                 trade("BUY", candle["open"], candle["timestamp"], signal, "FORECAST_ENTRY")
             elif quantity > 0 and (
                 signal["predicted_return"] <= exit_return
                 or signal["p_up"] < min_probability
+                or signal.get("positive_votes", 3) < 2
             ):
                 trade("SELL", candle["open"], candle["timestamp"], signal, "FORECAST_EXIT")
         if quantity > 0:
@@ -199,8 +241,8 @@ def compare_capitalization(
     slippage_rate: float, entry_edge: float,
     min_probability: float, exit_return: float,
 ) -> dict:
-    if horizon not in {2, 6, 24}:
-        raise ValueError("Horizonte precisa ser 2h, 6h ou 24h")
+    if horizon not in {0, 2, 6, 24}:
+        raise ValueError("Horizonte deve ser conjunto 2h+6h+24h ou individual 2h, 6h ou 24h")
     if not (math.isfinite(initial_capital) and initial_capital > 0):
         raise ValueError("Capital inicial inválido")
     if any(not math.isfinite(v) for v in (
@@ -213,10 +255,22 @@ def compare_capitalization(
         raise ValueError("Parâmetros da simulação fora dos limites permitidos")
     verified = compare_archives(original, replay)
     candles, seconds = _history(original)
-    source = _signals(original, horizon, candles, seconds)
-    candidate = _signals(replay, horizon, candles, seconds)
-    if source.keys() != candidate.keys():
-        raise ValueError("Sinais executáveis V1 e V2 em timestamps diferentes")
+    if horizon == 0:
+        sources, candidates = {}, {}
+        for h in (2, 6, 24):
+            sources[h] = _signals(original, h, candles, seconds)
+            candidates[h] = _signals(replay, h, candles, seconds)
+            if sources[h].keys() != candidates[h].keys():
+                raise ValueError(f"Sinais OOS originais e replay diferem para {h}h")
+        source = _joint_signals(sources)
+        candidate = _joint_signals(candidates)
+        if source.keys() != candidate.keys():
+            raise ValueError("O conjunto de decisões OOS não coincide entre modelos")
+    else:
+        source = _signals(original, horizon, candles, seconds)
+        candidate = _signals(replay, horizon, candles, seconds)
+        if source.keys() != candidate.keys():
+            raise ValueError("Sinais executáveis V1 e V2 em timestamps diferentes")
     start, end = min(source), max(source)
     if start == end:
         raise ValueError("Período OOS insuficiente para calcular capitalização")
@@ -235,6 +289,12 @@ def compare_capitalization(
             "same_market_history", "same_oos_targets", "same_fold_windows"
         )},
         "horizon_hours": horizon,
+        "horizons_hours": [2, 6, 24] if horizon == 0 else [horizon],
+        "policy": (
+            "2 of 3 positive directional votes; equal-weight probability; "
+            "6h normalized mean hourly return; next-open execution"
+            if horizon == 0 else "individual forecast, next-open execution"
+        ),
         "period_start": candles[start]["timestamp"].isoformat(),
         "period_end": candles[end]["timestamp"].isoformat(),
         "signal_count": len(source),
@@ -246,5 +306,5 @@ def compare_capitalization(
             "min_probability": min_probability, "exit_return": exit_return,
         },
         "results": results,
-        "note": "Simulação histórica OOS, sem execução real nem otimização nos testes.",
+        "note": "Simulação OOS de política conjunta 2h+6h+24h com pesos e consenso fixos, sem otimização sobre OOS. Nenhuma ordem real." if horizon == 0 else "Simulação histórica individual OOS, sem execução real nem otimização nos testes.",
     }
