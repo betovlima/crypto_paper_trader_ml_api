@@ -33,6 +33,7 @@ from .engine import ProbabilityCalibrator
 from .btc_policy import DEFAULT_POLICY, aggregate_signals, simulate_rotations, validate_policy
 from .alpaca_fees import ALPACA_FEE_MODEL, AlpacaFeeLedger, round_trip_cost
 from .frozen_cost_replay import replay_frozen_rotations
+from .forecast_quality import describe_return_predictions
 from .selection_robustness import (
     assess_robustness, STRESS_FEE_MULTIPLIER, STRESS_SLIPPAGE_MULTIPLIER,
     MIN_COMPLETED_CYCLES, MIN_ACTIVE_SEGMENTS, MIN_PROFITABLE_SEGMENTS,
@@ -413,6 +414,11 @@ def _score(
     actual = scoring["forecast_realized_return"].to_numpy(float)
     brier = float(brier_score_loss(y, probs))
     mae = float(mean_absolute_error(actual, forecasts))
+    magnitude_quality = describe_return_predictions(
+        forecasts, actual,
+        training_baseline_return=float(train["forecast_realized_return"].mean()),
+        horizon_hours=int(request.horizon_hours),
+    )
     capital = _simulate(
         scoring, probs, forecasts, request.fee_rate, request.slippage_rate,
         request.decision_timeframe,
@@ -436,6 +442,7 @@ def _score(
     return {
         "score": float(score),
         "brier": brier, "mae": mae, **capital,
+        "__return_quality": magnitude_quality,
         "__calibration": {
             "method": calibrator.method,
             "selection_brier": calibrator.selection_brier,
@@ -655,6 +662,8 @@ def _combine_horizon_metrics(
         "stress_same_trade_count": stressed["completed_cycles"],
         "stress_same_trade_schedule": stressed["same_trade_schedule"],
         "stress_method": stressed["stress_method"],
+        "stress_reprice_frozen_actions": True,
+        "stress_fees_hypothetical_only": True,
         "segment_cycle_counts": simulated["segment_cycle_counts"],
         "segment_returns": simulated["segment_returns"],
         "average_winning_cycle_usd": simulated["average_winning_cycle_usd"],
@@ -689,6 +698,7 @@ def _combine_horizon_metrics(
                 "mae": results[str(h)]["mae"],
                 "signal_count": len(signals_by_horizon[h]),
                 "calibration": results[str(h)].get("__calibration"),
+                "return_quality": results[str(h)].get("__return_quality"),
             } for h in JOINT_HORIZONS
         },
         "capital_note": "Um patrimônio BTC/CASH reinvestido; custos incluídos",
@@ -829,7 +839,7 @@ def _run_optimization(strategy_id: str) -> None:
                     "inactive_trials": len(inactive),
                     "insufficient_evidence_trials": len(insufficient),
                     "failed_trials": len(unsuccessful),
-                    "quality_gate": "V9_PRE_OOS_ROBUSTNESS_AND_ALPACA_STRESS",
+                    "quality_gate": "V10_PRE_OOS_FROZEN_TRADE_COST_STRESS",
                     "quality_by_trial": [
                         {"trial": item["trial"], "status": item["status"],
                          "robustness": item["metrics"].get("robustness")}
@@ -919,12 +929,14 @@ def _run_optimization(strategy_id: str) -> None:
             "policy_dimensions": len(POLICY_SPACE),
             "optimized_decision_policy": True,
             "capitalization_engine": "btc_policy.simulate_rotations",
-            "quality_gate": "V9_PRE_OOS_ROBUSTNESS_AND_ALPACA_STRESS",
+            "quality_gate": "V10_PRE_OOS_FROZEN_TRADE_COST_STRESS",
             "research_iteration_warning": "V9 foi projetada depois da inspeção de OOS da V8. Este OOS permanece excluído do treinamento, mas não é um teste novo independente entre versões.",
             "minimum_completed_cycles": MIN_COMPLETED_CYCLES,
             "minimum_active_segments": MIN_ACTIVE_SEGMENTS,
             "minimum_profitable_segments": MIN_PROFITABLE_SEGMENTS,
             "fee_stress_multiplier": STRESS_FEE_MULTIPLIER,
+            "stress_schedule": "All original pre-OOS buys and sells repriced at the identical candles without recomputing entries",
+            "regression_diagnostic": "Per-horizon forecasting error versus training-mean baseline; 5 quantile buckets and amplitude, development validation only",
             "slippage_stress_multiplier": STRESS_SLIPPAGE_MULTIPLIER,
             "quality_by_trial": [
                 {"trial": item["trial"], "status": item["status"],
