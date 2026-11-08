@@ -31,6 +31,7 @@ from .mexc import TIMEFRAME_SECONDS
 from .settings_service import get_runtime_parameters, get_runtime_parameters_from_snapshot, RuntimeParameters
 from .engine import ProbabilityCalibrator
 from .btc_policy import DEFAULT_POLICY, aggregate_signals, simulate_rotations, validate_policy
+from .alpaca_fees import ALPACA_FEE_MODEL, AlpacaFeeLedger, round_trip_cost
 
 
 # Expose an intentionally small, well-bounded search space; optimize the
@@ -155,6 +156,11 @@ def _candidate(point: np.ndarray) -> dict:
         round(settings["policy.entry_probability"] - 0.02, 6),
     )
     settings["policy.enabled"] = True
+    # Freeze the actual Alpaca fee model with each champion. Older strategy
+    # snapshots (without this key) keep their historic fixed fee semantics.
+    settings["policy.fee_model"] = ALPACA_FEE_MODEL
+    settings["policy.alpaca_liquidity"] = "TAKER"
+    settings["policy.alpaca_initial_30d_volume_usd"] = 0.0
     validate_policy(settings)
     return settings
 
@@ -440,7 +446,13 @@ def _score(
 
 def _entry_diagnostics(joint_signals: dict, cfg: dict, fee: float, slippage: float) -> dict:
     """Explain the opportunity funnel without using any realized returns."""
-    required_cost = (1 + slippage) / ((1 - fee) ** 2 * (1 - slippage)) - 1
+    if cfg.get("policy.fee_model") == ALPACA_FEE_MODEL:
+        quoted = AlpacaFeeLedger(
+            cfg["policy.alpaca_liquidity"],
+            cfg["policy.alpaca_initial_30d_volume_usd"]
+        ).quote(pd.Timestamp("2024-01-01", tz="UTC").to_pydatetime())
+        fee = quoted["rate"]
+    required_cost = round_trip_cost(fee, fee, slippage)
     samples = list(joint_signals.values())
     probabilities = np.asarray([float(row["p_up"]) for row in samples], dtype=float)
     predicted_returns = np.asarray([float(row["predicted_return"]) for row in samples], dtype=float)
@@ -544,6 +556,11 @@ def _combine_horizon_metrics(
         "win_rate": simulated["win_rate"],
         "profit_factor": simulated["profit_factor"],
         "fees_paid": simulated["fees_paid"],
+        "alpaca_fees_usd": simulated["alpaca_fees_usd"],
+        "slippage_usd_estimate": simulated["slippage_usd_estimate"],
+        "net_profit_usd": simulated["net_profit_usd"],
+        "fee_model": simulated["fee_model"],
+        "fee_tier_history": simulated["fee_tier_history"],
         "exposure": simulated["exposure"],
         "switch_count": simulated["switch_count"],
         "completed_cycles": simulated["completed_cycles"],
@@ -751,7 +768,10 @@ def _run_optimization(strategy_id: str) -> None:
             "caro_note": "Crypto adaptation using sklearn GPs, not the MCT BoTorch engine.",
             "selected_score": best_score,
             "candidate_policy": validate_policy(winner["parameters"]),
-            "capital_definition": "10,000 USDT, BTC/CASH, 100% reinvestimento, taxa/slippage do backtest original",
+            "capital_definition": "10,000 USD equivalentes, BTC/CASH, reinvestimento integral, taxas maker/taker Alpaca por 30D, slippage separado",
+            "fee_model": ALPACA_FEE_MODEL,
+            "fee_liquidity": "TAKER",
+            "fee_assumptions": "Crypto 8-tier 30d USD volume; reset 03:00 NY daily; only this strategy known; source BTCUSDT denominated in USDT approximates future BTCUSD",
             "initial_capital_for_selection": 10000,
             "completed_trials": sum(item["status"] == "COMPLETED" for item in records),
             "inactive_trials": sum(item["status"] == "NO_TRADES" for item in records),
