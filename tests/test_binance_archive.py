@@ -24,6 +24,7 @@ from crypto_paper_trader_ml_api.binance_archive import (
     _archive_paths,
     _parse_zip,
     _filter_closed_window,
+    _known_spot_halt,
 )
 from crypto_paper_trader_ml_api.schemas import MLBacktestCreate
 
@@ -273,3 +274,44 @@ def test_monthly_gap_can_be_recovered_only_from_verified_binance_daily_archive()
     assert repaired[0]["url"].endswith("BTCUSDT-1d-2026-06-14.zip")
     assert len(repaired[0]["sha256"]) == 64
     assert any(path.endswith("/BTCUSDT-1d-2026-06-14.zip.CHECKSUM") for path in hits)
+
+
+def test_only_the_exact_official_binance_spot_halt_is_allowed():
+    missing = pd.DatetimeIndex([
+        pd.Timestamp("2023-03-24T13:00:00Z"),
+        pd.Timestamp("2023-03-24T13:30:00Z"),
+    ])
+    no_unexpected = pd.DatetimeIndex([], tz="UTC")
+    match = _known_spot_halt(
+        symbol="BTCUSDT", timeframe="30min",
+        missing=missing, unexpected=no_unexpected,
+    )
+    assert len(match) == 1
+    assert match[0]["missing_candles"] == 2
+    assert match[0]["source_url"].startswith("https://www.binance.com/")
+    assert match[0]["market_status"] == "SPOT_TRADING_SUSPENDED"
+    assert _known_spot_halt(
+        symbol="BTCUSDT", timeframe="30min",
+        missing=missing[:1], unexpected=no_unexpected,
+    ) == []
+    assert _known_spot_halt(
+        symbol="BTCUSDT", timeframe="1hour",
+        missing=missing, unexpected=no_unexpected,
+    ) == []
+    assert _known_spot_halt(
+        symbol="ETHUSDT", timeframe="30min",
+        missing=missing, unexpected=no_unexpected,
+    ) == []
+    assert _known_spot_halt(
+        symbol="BTCUSDT", timeframe="30min",
+        missing=missing, unexpected=pd.DatetimeIndex([
+            pd.Timestamp("2023-03-24T14:15:00Z")
+        ]),
+    ) == []
+    assert _known_spot_halt(
+        symbol="BTCUSDT", timeframe="30min",
+        missing=pd.DatetimeIndex([
+            pd.Timestamp("2026-06-14T13:00:00Z"),
+            pd.Timestamp("2026-06-14T13:30:00Z"),
+        ]), unexpected=no_unexpected,
+    ) == []

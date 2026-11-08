@@ -93,3 +93,28 @@ def test_future_label_availability_is_recorded_for_fold_purging():
     assert pd.isna(labelled["label_available_at"].iloc[-1])
     assert pd.isna(labelled["entry_label"].iloc[-1])
     assert pd.notna(labelled["entry_label"].iloc[-5])
+
+
+def test_market_halt_resets_indicators_and_disallows_labels_crossing_the_gap():
+    params = default_parameters(**{"labels.horizon_candles": 12})
+    raw = synthetic_candles(520)
+    # 30-minute bars 200 and 201 are genuinely absent. Never create them.
+    interrupted = raw.drop(index=[200, 201]).reset_index(drop=True)
+    featured = build_features(interrupted, params, decision_timeframe="30min")
+    assert len(featured) == 518
+    assert featured["market_segment"].nunique() == 2
+    assert featured.loc[199, "market_segment"] == 0
+    assert featured.loc[200, "market_segment"] == 1
+    assert pd.isna(featured.loc[200, "return_1"])
+    assert pd.isna(featured.loc[200, "atr_14"])
+    assert pd.isna(featured.loc[200, "ema_21"])
+    assert pd.notna(featured.loc[250, "return_1"])
+    assert pd.notna(featured.loc[250, "atr_14"])
+    labelled = create_labels(featured, params)
+    assert pd.isna(labelled.loc[198, "entry_label"])
+    assert pd.isna(labelled.loc[198, "exit_label"])
+    assert pd.isna(labelled.loc[198, "label_available_at"])
+    assert pd.notna(labelled.loc[187, "entry_label"])
+    assert pd.notna(labelled.loc[250, "entry_label"])
+    assert raw.loc[200, "timestamp"] not in set(labelled["timestamp"])
+    assert raw.loc[201, "timestamp"] not in set(labelled["timestamp"])

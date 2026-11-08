@@ -99,6 +99,7 @@ def test_full_audit_preserves_every_prediction_candle_and_execution():
             "model_metadata.json", "report.json", "predictions_oos.csv",
             "positions_full.csv", "executions_full.csv", "trades_full.csv",
             "README.txt", "folds.json", "history_coverage.json",
+            "market_interruptions.json",
         } == names
         manifest = json.loads(z.read("manifest.json"))
         assert manifest["scope"] == "OUT_OF_SAMPLE"
@@ -106,6 +107,7 @@ def test_full_audit_preserves_every_prediction_candle_and_execution():
         assert manifest["candles"] == 5
         assert manifest["schema_version"] == 2
         assert manifest["raw_history_included"] is False
+        assert json.loads(z.read("market_interruptions.json")) == {}
         prediction_rows = _rows(z, "predictions_oos.csv")
         position_rows = _rows(z, "positions_full.csv")
         action_rows = _rows(z, "executions_full.csv")
