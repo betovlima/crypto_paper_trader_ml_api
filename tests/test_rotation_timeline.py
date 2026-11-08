@@ -33,12 +33,15 @@ def _request():
 
 def test_distance_to_peak_uses_only_closing_prices_observed_so_far():
     trace = build_rotation_timeline(
-        [_row(0, 100), _row(1, 108), _row(2, 102), _row(3, 120)], 100
+        [_row(0, 100), _row(1, 108), _row(2, 102, actions=[
+            {"action": "BUY", "execution_price": 105.0, "reason": "XGB_ENTRY"}
+        ]), _row(3, 120)], 100
     )
     assert [row["peak_close_so_far"] for row in trace] == [100, 108, 108, 120]
     assert trace[2]["distance_to_peak"] == pytest.approx(102 / 108 - 1)
     assert trace[0]["distance_to_peak"] == 0
     assert trace[3]["distance_to_peak"] == 0
+    assert trace[2]["actions"][0]["distance_to_peak_at_execution"] == pytest.approx(105 / 108 - 1)
 
 
 def test_sampling_retains_every_executed_switch():
@@ -137,3 +140,7 @@ def test_terminal_liquidation_is_reflected_in_final_position_and_actions():
     assert last["actions"][-1]["action"] == "SELL"
     assert last["actions"][-1]["reason"] == "END_OF_TEST"
     assert last["equity"] == simulated["equity_curve"][-1]["equity"]
+    trace = build_rotation_timeline(simulated["rotation_rows"], 50)
+    assert trace[-1]["actions"][-1]["distance_to_peak_at_execution"] == pytest.approx(
+        (100.0 * (1 - _request().slippage_rate)) / 100.0 - 1
+    )
