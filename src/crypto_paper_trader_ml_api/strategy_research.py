@@ -824,6 +824,7 @@ def _run_optimization(strategy_id: str) -> None:
                          "robustness": item["metrics"].get("robustness")}
                         for item in records if item.get("metrics")
                     ],
+                    "research_iteration_warning": "V9 foi projetada depois da inspeção de OOS da V8. Este OOS permanece excluído do treinamento, mas não é um teste novo independente entre versões.",
                     "selection_warning": (
                         "Houve compras na validação, mas nenhum candidato "
                         "demonstrou consistência suficiente antes do OOS."
@@ -908,6 +909,7 @@ def _run_optimization(strategy_id: str) -> None:
             "optimized_decision_policy": True,
             "capitalization_engine": "btc_policy.simulate_rotations",
             "quality_gate": "V9_PRE_OOS_ROBUSTNESS_AND_ALPACA_STRESS",
+            "research_iteration_warning": "V9 foi projetada depois da inspeção de OOS da V8. Este OOS permanece excluído do treinamento, mas não é um teste novo independente entre versões.",
             "minimum_completed_cycles": MIN_COMPLETED_CYCLES,
             "minimum_active_segments": MIN_ACTIVE_SEGMENTS,
             "minimum_profitable_segments": MIN_PROFITABLE_SEGMENTS,
