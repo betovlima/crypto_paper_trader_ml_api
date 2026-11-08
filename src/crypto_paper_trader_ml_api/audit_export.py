@@ -92,6 +92,7 @@ def build_audit_archive(
     manifest = {
         "schema_version": 2,
         "kind": "CRYPTO_PAPER_TRADER_ML_AUDIT",
+        "model_family": "LightGBM",
         "scope": "OUT_OF_SAMPLE",
         "symbol": request.symbol,
         "market_history_source": request.history_source,
