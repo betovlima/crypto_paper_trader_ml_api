@@ -31,7 +31,8 @@ def _fast_tuning(monkeypatch, *, tradable):
         lambda per_horizon, **kwargs: {
             "score": 0.12 if tradable else -0.01,
             "capital_final": 10100 if tradable else 10000,
-            "completed_cycles": 2 if tradable else 0,
+            "completed_cycles": 6 if tradable else 0,
+            "robustness": {"passed": bool(tradable), "reason_codes": []},
             "entry_diagnostics": {
                 "total_aligned_signals": 8,
                 "passes_all_entry_filters": 2 if tradable else 0,
