@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 from typing import Iterator
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, create_engine, event, inspect, text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from .config import get_bootstrap_settings
@@ -36,6 +36,22 @@ class MLBacktestJob(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class MLBacktestAudit(Base):
+    """Compressed complete out-of-sample audit, stored separately from UI data."""
+
+    __tablename__ = "ml_backtest_audits"
+
+    job_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("ml_backtest_jobs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    archive_zip: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
 
 
 class MLRuntimeParameter(Base):
