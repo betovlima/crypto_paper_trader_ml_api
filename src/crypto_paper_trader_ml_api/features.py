@@ -94,6 +94,29 @@ def build_features(
     if decision_timeframe not in TIMEFRAME_SECONDS or trend_timeframe not in TIMEFRAME_SECONDS:
         raise ValueError("Unknown decision or trend timeframe for causal feature alignment")
     data = decision.copy().sort_values("timestamp").reset_index(drop=True)
+    expected_step = pd.Timedelta(seconds=TIMEFRAME_SECONDS[decision_timeframe])
+    segments = data["timestamp"].diff().ne(expected_step)
+    if len(segments):
+        segments.iloc[0] = False
+    if segments.any():
+        # No artificial candles: compute every rolling and recursive indicator
+        # independently on the two sides of a real market closure. This also
+        # prevents price returns from silently spanning the unavailable bars.
+        parts = []
+        for segment_number, (_, block) in enumerate(
+            data.groupby(segments.cumsum(), sort=False)
+        ):
+            part = build_features(
+                block, parameters, trend,
+                decision_timeframe=decision_timeframe,
+                trend_timeframe=trend_timeframe,
+            )
+            part["market_segment"] = segment_number
+            parts.append(part)
+        return pd.concat(parts, ignore_index=True).sort_values(
+            "timestamp"
+        ).reset_index(drop=True)
+    data["market_segment"] = 0
     data["decision_available_at"] = (
         pd.to_datetime(data["timestamp"], utc=True)
         + pd.Timedelta(seconds=TIMEFRAME_SECONDS[decision_timeframe])
@@ -258,7 +281,16 @@ def create_labels(frame: pd.DataFrame, parameters: RuntimeParameters) -> pd.Data
     exit_target_atr = parameters.floating("labels.exit_target_atr")
     exit_invalidation_atr = parameters.floating("labels.exit_invalidation_atr")
 
+    segment_numbers = (
+        data["market_segment"].to_numpy()
+        if "market_segment" in data
+        else np.zeros(len(data), dtype=int)
+    )
     for index in range(len(data) - horizon):
+        # The model must not use future price/stop outcomes across
+        # a suspended trading interval. The gap rows do not exist.
+        if segment_numbers[index] != segment_numbers[index + horizon]:
+            continue
         if not np.isfinite(atr[index]) or atr[index] <= 0:
             continue
         entry = closes[index]
@@ -291,5 +323,7 @@ def create_labels(frame: pd.DataFrame, parameters: RuntimeParameters) -> pd.Data
     # The label may depend on the very last candle in the lookahead window.
     # Its full availability time is used to purge adjacent temporal folds.
     if "decision_available_at" in data:
-        data["label_available_at"] = data["decision_available_at"].shift(-horizon)
+        data["label_available_at"] = data["decision_available_at"].shift(-horizon).where(
+            data["entry_label"].notna()
+        )
     return data
