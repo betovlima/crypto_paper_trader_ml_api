@@ -164,7 +164,9 @@ def test_direction_audit_keeps_every_oos_prediction_and_no_trading_claim():
 
 def test_old_target_stop_mode_remains_default_and_invalid_direct_symbols_are_rejected():
     params = default_parameters()
-    unchanged = _resolve_request(MLBacktestCreate(symbol="BTCUSDT"), params)
+    unchanged = _resolve_request(
+        MLBacktestCreate(symbol="BTCUSDT", experiment_type="TARGET_STOP"), params
+    )
     assert unchanged.experiment_type == "TARGET_STOP"
     forecast = _resolve_request(MLBacktestCreate(
         symbol="BTCUSDT", experiment_type="BTC_DIRECTION_RETURN",
