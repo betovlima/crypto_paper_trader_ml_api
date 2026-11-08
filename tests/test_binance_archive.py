@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from io import BytesIO, StringIO
 from pathlib import PurePosixPath
-from zipfile import ZipFile, ZIP_DEFLATED
+from zipfile import ZipFile, ZIP_DEFLATED, ZipInfo
 
 import httpx
 import pandas as pd
@@ -32,7 +32,11 @@ from .helpers import default_parameters
 def _make_archive(filename, rows):
     buffer = BytesIO()
     with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as target:
-        target.writestr(filename, "\n".join(",".join(map(str, row)) for row in rows) + "\n")
+        # Fixed ZIP timestamp makes independent .zip and .CHECKSUM requests
+        # produce identical bytes without test timing flakiness.
+        entry = ZipInfo(filename, date_time=(2020, 1, 1, 0, 0, 0))
+        entry.compress_type = ZIP_DEFLATED
+        target.writestr(entry, "\n".join(",".join(map(str, row)) for row in rows) + "\n")
     return buffer.getvalue()
 
 
