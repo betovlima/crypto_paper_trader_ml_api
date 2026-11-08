@@ -7,7 +7,7 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import average_precision_score, brier_score_loss, log_loss, precision_score
+from sklearn.metrics import average_precision_score, brier_score_loss, log_loss, precision_score, roc_auc_score
 from xgboost import XGBClassifier
 
 from . import __version__
@@ -247,20 +247,38 @@ def _safe_model_metrics(
     probabilities: np.ndarray,
     threshold: float,
     parameters: RuntimeParameters,
+    baseline_probabilities: np.ndarray | None = None,
 ) -> dict:
     epsilon = parameters.floating("simulation.probability_clip_epsilon")
     clipped = np.clip(probabilities, epsilon, 1 - epsilon)
     predicted = (clipped >= threshold).astype(int)
     both_classes = len(np.unique(labels)) > 1
     brier = float(brier_score_loss(labels, clipped))
+    reference_brier = (
+        float(brier_score_loss(labels, np.clip(
+            baseline_probabilities, epsilon, 1 - epsilon
+        )))
+        if baseline_probabilities is not None else None
+    )
+    # Positive skill means better calibration than a training-only
+    # event-frequency reference, evaluated on exactly the same OOS rows.
+    brier_skill = (
+        1.0 - brier / reference_brier
+        if reference_brier is not None and reference_brier > 0 else None
+    )
     return {
         "precision": round(float(precision_score(labels, predicted, zero_division=0)), 4),
         "pr_auc": round(float(average_precision_score(labels, clipped)), 4) if both_classes else None,
+        "roc_auc": round(float(roc_auc_score(labels, clipped)), 4) if both_classes else None,
         "log_loss": round(float(log_loss(labels, clipped, labels=[0, 1])), 4),
         "brier_score": round(brier, 4),
+        "baseline_brier_score": round(reference_brier, 4) if reference_brier is not None else None,
+        "brier_skill_score": round(brier_skill, 4) if brier_skill is not None else None,
+        "event_prevalence_oos": round(float(np.mean(labels)), 6),
         "calibration": (
             "GOOD"
             if brier <= parameters.floating("simulation.calibration_good_brier")
+            and (brier_skill is None or brier_skill > 0)
             else "REVIEW"
         ),
     }
@@ -283,6 +301,10 @@ def simulate_portfolio(
     equity_rows: list[dict] = []
     rotation_rows: list[dict] = []
     exposed_bars = 0
+    entry_candidates = 0
+    entry_probability_passes = 0
+    entry_trend_passes = 0
+    entry_combined_passes = 0
     pending_action: str | None = None
     pending_reason: str | None = None
 
@@ -295,6 +317,14 @@ def simulate_portfolio(
     minimum_trend_gap = parameters.floating("simulation.minimum_trend_gap")
 
     first_close = float(frame.iloc[0]["close"])
+    if first_close <= 0:
+        raise ValueError("BTC close must be positive for the benchmark")
+    # Benchmark purchases at first OOS close and values liquidation at
+    # each close, applying the same fee and slippage rates as the strategy.
+    buy_hold_quantity = (
+        request.initial_capital * (1 - request.fee_rate)
+        / (first_close * (1 + request.slippage_rate))
+    )
     for index, row in frame.iterrows():
         bar_actions: list[dict] = []
         open_price = float(row["open"])
@@ -394,7 +424,12 @@ def simulate_portfolio(
                     float(row[medium_ema]) > float(row[slow_ema])
                     and float(row["trend_ema_gap"]) > minimum_trend_gap
                 )
-                if float(row["entry_probability"]) >= request.entry_threshold and trend_ok:
+                probability_ok = float(row["entry_probability"]) >= request.entry_threshold
+                entry_candidates += 1
+                entry_probability_passes += int(probability_ok)
+                entry_trend_passes += int(trend_ok)
+                entry_combined_passes += int(probability_ok and trend_ok)
+                if probability_ok and trend_ok:
                     pending_action = "BUY"
                     pending_reason = "XGB_ENTRY"
             elif quantity > 0 and pending_action is None:
@@ -405,7 +440,10 @@ def simulate_portfolio(
                     pending_reason = "XGB_EXIT" if model_exit else "TREND_INVALIDATION"
 
         equity = cash + quantity * close_price
-        buy_hold = request.initial_capital * close_price / first_close
+        buy_hold = (
+            buy_hold_quantity * close_price
+            * (1 - request.slippage_rate) * (1 - request.fee_rate)
+        )
         equity_rows.append(
             {
                 "timestamp": pd.Timestamp(row["timestamp"]).isoformat(),
@@ -457,6 +495,17 @@ def simulate_portfolio(
         "equity_curve": equity_rows,
         "rotation_rows": rotation_rows,
         "exposure": exposed_bars / max(1, len(frame)),
+        "signal_diagnostics": {
+            "eligible_cash_candles": entry_candidates,
+            "entry_probability_above_threshold": entry_probability_passes,
+            "entry_trend_approved": entry_trend_passes,
+            "entry_both_approved": entry_combined_passes,
+            "entry_probability_max": float(frame["entry_probability"].max()),
+            "entry_probability_mean": float(frame["entry_probability"].mean()),
+            "buy_hold_fee_rate": request.fee_rate,
+            "buy_hold_slippage_rate": request.slippage_rate,
+            "benchmark_execution": "BUY_FIRST_OOS_CLOSE_SELL_LAST_OOS_CLOSE",
+        },
     }
 
 
@@ -505,12 +554,16 @@ def calculate_results(
         frame["entry_probability"].to_numpy(float),
         request.entry_threshold,
         parameters,
+        frame["entry_baseline_probability"].to_numpy(float)
+        if "entry_baseline_probability" in frame else None,
     )
     exit_metrics = _safe_model_metrics(
         frame["exit_label"].to_numpy(int),
         frame["exit_probability"].to_numpy(float),
         request.exit_threshold,
         parameters,
+        frame["exit_baseline_probability"].to_numpy(float)
+        if "exit_baseline_probability" in frame else None,
     )
 
     maximum_points = parameters.integer("simulation.equity_curve_points")
@@ -532,6 +585,7 @@ def calculate_results(
             "sortino": round(sortino, 4),
             "profit_factor": round(gross_profit / gross_loss, 4) if gross_loss > 0 else None,
             "trade_count": len(trades),
+            "has_executed_trades": bool(trades),
             "win_rate": round(len(wins) / len(trades), 6) if trades else 0.0,
             "exposure": round(float(simulation["exposure"]), 6),
             "fees_paid": round(float(simulation["fees_paid"]), 4),
@@ -547,6 +601,9 @@ def calculate_results(
             "decision_timeframe": request.decision_timeframe,
             "trend_timeframe": request.trend_timeframe,
             "parameter_source": "DATABASE_SNAPSHOT",
+            "fold_windows": model_metadata.get("fold_windows", []),
+            "label_horizon_candles": model_metadata.get("label_horizon_candles"),
+            "history_coverage": model_metadata.get("history_coverage"),
         },
         "models": {
             "entry": entry_metrics,
@@ -569,6 +626,7 @@ def calculate_results(
                 "return_total": round(float(buy_hold_curve[-1] / request.initial_capital - 1), 6),
                 "max_drawdown": round(_max_drawdown(buy_hold_curve), 6),
                 "sharpe": None,
+                "benchmark_costs_included": True,
             },
         ],
         "trades": trades[-maximum_trades:],
@@ -583,6 +641,16 @@ def calculate_results(
             "entry_threshold": request.entry_threshold,
             "exit_threshold": request.exit_threshold,
             "beats_buy_and_hold": capital_final > float(buy_hold_curve[-1]),
+            "strategy_has_trades": bool(trades),
+            "no_trade_reason": (
+                "ENTRY_PROBABILITY_BELOW_THRESHOLD"
+                if not trades and simulation.get("signal_diagnostics", {}).get("entry_probability_above_threshold") == 0
+                else "ENTRY_FILTERS_NOT_SIMULTANEOUSLY_APPROVED"
+                if not trades and simulation.get("signal_diagnostics", {}).get("entry_both_approved") == 0
+                else "NO_COMPLETED_TRADES" if not trades else None
+            ),
+            "signal_diagnostics": simulation.get("signal_diagnostics", {}),
+            "benchmark_costs_included": True,
         },
     }
 
