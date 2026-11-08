@@ -93,3 +93,29 @@ def test_stress_uses_same_market_candles_with_cost_multiplier_not_future_prices(
     assert candles == frozen_candles and decisions == frozen_signals
     assert baseline["average_win_loss_ratio"] is not None
     assert baseline["largest_win_share_of_gross_wins"] == 1.0
+
+def test_six_hour_forecast_diagnostic_does_not_look_beyond_selection_window():
+    from crypto_paper_trader_ml_api.strategy_research import _forecast_realization_diagnostics
+    candles = _candles([(100 + i, 100 + i) for i in range(30)])
+    signals = {
+        i: {
+            **_signal(i, value=.008, probability=.65, votes=2),
+            "predicted_return": .008 + i * .0001,
+        }
+        for i in (1, 4, 8, 17, 18, 25)
+    }
+    policy = {
+        **DEFAULT_POLICY, "policy.entry_probability": .5,
+        "policy.min_positive_votes": 1, "policy.entry_edge": 0,
+    }
+    frozen = copy.deepcopy(signals)
+    result = _forecast_realization_diagnostics(
+        candles, signals, policy, fee=.001, slippage=.0005, bar_seconds=1800,
+    )
+    # Last start at i=25 has no full 6h path inside scoring; no future OOS.
+    assert result["rows"] == 5
+    assert result["horizon_hours"] == 6
+    assert result["entry_eligible_rows"] == 5
+    assert result["mean_realized_return"] > 0
+    assert result["return_correlation"] is not None
+    assert signals == frozen
