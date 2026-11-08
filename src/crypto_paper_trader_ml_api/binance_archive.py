@@ -127,6 +127,27 @@ def _parse_zip(payload: bytes, expected_name: str, *, cutoff_ms: int) -> list[di
         raise BinanceArchiveError(f"Corrupted ZIP: {expected_name}") from exc
 
 
+
+def _filter_closed_window(
+    frame: pd.DataFrame,
+    *,
+    start_ms: int,
+    cutoff_ms: int,
+    maximum_rows: int,
+) -> pd.DataFrame:
+    """Keep closed UTC candles without assuming pandas timestamp precision.
+
+    pandas can store datetime64[ns] or datetime64[us]. Converting its
+    timestamps to int64 and dividing by 1_000_000 is only correct for ns;
+    direct timezone-aware comparison works for both.
+    """
+    start_at = pd.Timestamp(start_ms, unit="ms", tz="UTC")
+    return frame.loc[
+        (frame["timestamp"] >= start_at)
+        & (frame["close_time_ms"] < cutoff_ms)
+    ].tail(maximum_rows).reset_index(drop=True)
+
+
 class BinancePublicArchiveClient:
     """Read checksum-verified monthly/daily spot archives with SHA256 checks."""
 
@@ -230,10 +251,12 @@ class BinancePublicArchiveClient:
             .sort_values("timestamp")
             .reset_index(drop=True)
         )
-        frame = frame.loc[
-            (frame["timestamp"].astype("int64") // 1_000_000 >= start_ms)
-            & (frame["close_time_ms"] < cutoff_ms)
-        ].tail(required_with_warmup).reset_index(drop=True)
+        frame = _filter_closed_window(
+            frame,
+            start_ms=start_ms,
+            cutoff_ms=cutoff_ms,
+            maximum_rows=required_with_warmup,
+        )
         if len(frame) < required_with_warmup - 1:
             raise BinanceArchiveError(
                 f"Requested {required_with_warmup} {timeframe} candles, "
