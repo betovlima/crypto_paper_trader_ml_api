@@ -41,7 +41,13 @@ def assess_robustness(base: dict[str, Any], stressed: dict[str, Any]) -> dict[st
     concentration = float(base.get("largest_win_share_of_gross_wins") or 0)
     net = float(base["net_profit_usd"])
     stressed_net = float(stressed["net_profit_usd"])
+    frozen_schedule = (
+        stressed.get("frozen_schedule") is True
+        and stressed.get("same_trade_schedule") is True
+        and int(stressed.get("completed_cycles", -1)) == cycles
+    )
     checks = {
+        "same_trades_under_stress": frozen_schedule,
         "min_cycles": cycles >= MIN_COMPLETED_CYCLES,
         "distributed_cycles": active >= MIN_ACTIVE_SEGMENTS,
         "positive_segments": positive >= MIN_PROFITABLE_SEGMENTS,
@@ -63,10 +69,16 @@ def assess_robustness(base: dict[str, Any], stressed: dict[str, Any]) -> dict[st
         "largest_win_share_of_gross_wins": concentration,
         "base_net_profit_usd": net,
         "stress_net_profit_usd": stressed_net,
+        "stress_method": stressed.get("stress_method"),
+        "same_trades_under_stress": frozen_schedule,
+        "stress_completed_cycles": int(stressed.get("completed_cycles", 0)),
+        "stress_net_profit_delta_usd": stressed_net - net,
         "stress_final_capital": float(stressed["capital_final"]),
         "stress_fees_paid_usd": float(stressed["fees_paid"]),
         "stress_slippage_usd_estimate": float(stressed["slippage_usd_estimate"]),
         "stress_fee_multiplier": STRESS_FEE_MULTIPLIER,
+        "stress_fees_are_hypothetical": True,
+        "stress_entry_filters_rerun": False,
         "stress_slippage_multiplier": STRESS_SLIPPAGE_MULTIPLIER,
         "thresholds": {
             "minimum_completed_cycles": MIN_COMPLETED_CYCLES,
