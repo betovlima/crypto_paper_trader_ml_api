@@ -119,26 +119,85 @@ def _candidate(point: np.ndarray) -> dict:
 def _next_candidate(
     index: int, mode: str, points: list[np.ndarray], scores: list[float],
     sampler: qmc.LatinHypercube, rng: np.random.Generator,
+    observations: list[dict] | None = None,
 ) -> np.ndarray:
-    if mode != "BAYESIAN" or len(points) < 8:
+    """Crypto CARO: initial space filling, then risk-constrained GP search.
+
+    Adapted from the MCT's unified exploration/refinement idea. It uses
+    scikit-learn GPs, not the MCT's BoTorch four-outcome CARO engine.
+    """
+    if mode != "BAYESIAN" or len(points) < 8 or not observations:
+        return sampler.random(1)[0]
+    valid = [
+        (point, row["metrics"], row["metrics"]["score"])
+        for point, row in zip(points, observations, strict=True)
+        if row.get("status") == "COMPLETED"
+        and all(np.isfinite(float(row["metrics"].get(key, np.nan)))
+                for key in ("capital_final", "sharpe", "max_drawdown", "worst_fold_return", "score"))
+    ]
+    if len(valid) < 8:
         return sampler.random(1)[0]
     try:
-        kernel = ConstantKernel(1.0, (0.01, 100.0)) * Matern(
-            length_scale=np.ones(len(SPACE)), nu=2.5
-        ) + WhiteKernel(noise_level=0.001)
-        gp = GaussianProcessRegressor(
-            kernel=kernel, normalize_y=True, random_state=42,
-            n_restarts_optimizer=1,
+        best_point, benchmark, _ = max(valid, key=lambda item: item[2])
+        x = np.stack([item[0] for item in valid])
+        targets = (
+            "capital_final", "sharpe", "max_drawdown", "worst_fold_return"
         )
-        gp.fit(np.stack(points), np.asarray(scores))
-        choices = rng.uniform(size=(320, len(SPACE)))
-        means, uncertainty = gp.predict(choices, return_std=True)
-        uncertainty = np.maximum(uncertainty, 1e-9)
-        improvement = means - max(scores) - 0.001
-        z = improvement / uncertainty
-        expected_improvement = improvement * norm.cdf(z) + uncertainty * norm.pdf(z)
-        return choices[int(np.argmax(expected_improvement))]
-    except (ValueError, np.linalg.LinAlgError):
+        # Global exploration remains available, even after a strong champion.
+        # Trust-region refinement shrinks when recent trials improve.
+        history = [item[2] for item in valid]
+        improvement_recently = max(history[-4:]) > max(history[:-4], default=-np.inf)
+        radius = 0.15 if improvement_recently else 0.30
+        local = np.clip(
+            rng.normal(loc=best_point, scale=radius, size=(224, len(SPACE))),
+            0.0, 1.0,
+        )
+        global_pool = rng.uniform(size=(128, len(SPACE)))
+        pool = np.vstack([local, global_pool])
+        posterior = {}
+        for key in targets:
+            kernel = ConstantKernel(1.0) * Matern(
+                length_scale=np.ones(len(SPACE)), nu=2.5
+            ) + WhiteKernel(noise_level=0.001)
+            gp = GaussianProcessRegressor(
+                kernel=kernel, random_state=42, normalize_y=True,
+                alpha=1e-6, n_restarts_optimizer=0,
+            )
+            gp.fit(x, np.array([item[1][key] for item in valid], dtype=float))
+            mean, uncertainty = gp.predict(pool, return_std=True)
+            posterior[key] = (mean, np.maximum(uncertainty, 1e-9))
+
+        cap_mean, cap_std = posterior["capital_final"]
+        min_improvement = float(benchmark["capital_final"]) * 0.005
+        threshold = float(benchmark["capital_final"]) + min_improvement
+        delta = cap_mean - threshold
+        z = delta / cap_std
+        expected_improvement = delta * norm.cdf(z) + cap_std * norm.pdf(z)
+        prob_profit = norm.sf((threshold - cap_mean) / cap_std)
+        sharpe_mean, sharpe_std = posterior["sharpe"]
+        dd_mean, dd_std = posterior["max_drawdown"]
+        fold_mean, fold_std = posterior["worst_fold_return"]
+        # Higher is better for all: max drawdown is a negative fraction.
+        prob_risk = (
+            norm.sf((float(benchmark["sharpe"]) - 0.05 - sharpe_mean) / sharpe_std)
+            * norm.sf((float(benchmark["max_drawdown"]) - 0.03 - dd_mean) / dd_std)
+            * norm.sf((float(benchmark["worst_fold_return"]) - 0.03 - fold_mean) / fold_std)
+        )
+        distance = np.linalg.norm(pool[:, None, :] - x[None, :, :], axis=2).min(axis=1)
+        # Constrained expected capital improvement, with a small exploration
+        # floor and novelty bonus to avoid getting stuck at the champion.
+        utility = (
+            expected_improvement / 10000.0 * prob_risk
+            + 0.015 * prob_profit * prob_risk
+            + 0.003 * cap_std / 10000.0
+            + 0.003 * np.minimum(distance, 1.0)
+        )
+        utility[distance < 1e-5] = -np.inf
+        position = int(np.argmax(utility))
+        if not np.isfinite(utility[position]):
+            return sampler.random(1)[0]
+        return pool[position]
+    except (ValueError, np.linalg.LinAlgError, FloatingPointError):
         return sampler.random(1)[0]
 
 
@@ -215,6 +274,7 @@ def _simulate(
     required_edge = (1 + slippage) / ((1 - fee)**2 * (1 - slippage)) - 1
     equity, btc = 10000.0, 0.0
     peak, maxdd, buys, sells = equity, 0.0, 0, 0
+    curve = [equity]
     for index in range(1, len(scoring)):
         if (timestamps.iloc[index] - timestamps.iloc[index - 1]).total_seconds() == step:
             estimate = float(forecasts[index - 1])
@@ -230,12 +290,22 @@ def _simulate(
         value = equity + btc * close[index]
         peak = max(value, peak)
         maxdd = min(maxdd, value / peak - 1)
+        curve.append(value)
     if btc > 0:
         equity = btc * close[-1] * (1 - slippage) * (1 - fee)
         sells += 1
+        curve[-1] = equity
+    returns = np.diff(np.asarray(curve, dtype=float)) / np.maximum(1e-9, curve[:-1])
+    std = float(np.std(returns)) if len(returns) else 0.0
+    sharpe = float(np.mean(returns) / std * np.sqrt(365.25 * 48)) if std > 1e-12 else 0.0
+    segments = np.array_split(np.arange(len(curve)), 3)
+    fold_returns = [float(curve[segment[-1]] / curve[segment[0]] - 1)
+                    for segment in segments if len(segment) > 1]
+    worst_fold = min(fold_returns) if fold_returns else 0.0
     return {
         "capital_final": float(equity), "return_total": float(equity / 10000 - 1),
         "max_drawdown": float(maxdd), "buys": buys, "sells": sells,
+        "sharpe": sharpe, "worst_fold_return": float(worst_fold),
     }
 
 
@@ -279,6 +349,8 @@ def _score(
     score = (
         math.log(max(1e-9, capital["capital_final"] / 10000))
         + 0.5 * capital["max_drawdown"]
+        + 0.01 * np.clip(capital["sharpe"], -4, 4)
+        + 0.3 * min(0.0, capital["worst_fold_return"])
         - 0.03 * brier
         - 0.03 * mae
         - (0.01 if capital["buys"] == 0 else 0)
@@ -334,7 +406,7 @@ def _run_optimization(strategy_id: str) -> None:
                 if current is None or current.status == "CANCEL_REQUESTED":
                     _update_strategy(strategy_id, status="CANCELLED", error_message=None)
                     return
-            vector = _next_candidate(index, mode, points, scores, sampler, rng)
+            vector = _next_candidate(index, mode, points, scores, sampler, rng, records)
             candidate = _candidate(vector)
             try:
                 metrics = _score(dataset, candidate, base)
@@ -365,6 +437,8 @@ def _run_optimization(strategy_id: str) -> None:
             "calibration_rows": len(calibration),
             "selection_rows": len(scoring),
             "model_family": "LightGBM",
+            "optimization_algorithm": ("CRYPTO_CARO_GP_CONSTRAINED_EI" if mode == "BAYESIAN" else "LATIN_HYPERCUBE"),
+            "caro_note": "Crypto adaptation using sklearn GPs, not the MCT BoTorch engine.",
             "selected_score": best_score,
             "completed_trials": sum(item["status"] == "COMPLETED" for item in records),
             "failed_trials": sum(item["status"] == "FAILED" for item in records),
