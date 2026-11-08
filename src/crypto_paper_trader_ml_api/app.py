@@ -10,6 +10,7 @@ from .cors import DatabaseCORSMiddleware
 from .database import initialize_database
 from .schemas import (
     HealthResponse,
+    BTCCapitalizationRequest,
     MLBacktestCreate,
     MLBacktestJobDetail,
     MLBacktestJobResponse,
@@ -17,7 +18,7 @@ from .schemas import (
     RuntimeParametersResponse,
     RuntimeParametersUpdateRequest,
 )
-from .service import cancel_job, create_job, create_replay_job, get_audit_zip, get_job, list_jobs
+from .service import cancel_job, capitalize_replay_job, create_job, create_replay_job, get_audit_zip, get_job, list_jobs
 from .settings_service import (
     ParameterValidationError,
     get_runtime_parameters,
@@ -124,6 +125,27 @@ def backtest_detail(job_id: str) -> dict:
     if not job:
         raise HTTPException(status_code=404, detail="ML backtest not found")
     return job
+
+
+@app.post("/v1/ml-backtests/{job_id}/capitalization")
+def btc_capitalization(job_id: str, request: BTCCapitalizationRequest) -> dict:
+    """Financial V1/V2/Buy-and-Hold replay: no broker orders or exchange downloads."""
+    try:
+        return capitalize_replay_job(
+            job_id, {
+                "horizon": request.horizon_hours,
+                "initial_capital": request.initial_capital,
+                "fee_rate": request.fee_rate,
+                "slippage_rate": request.slippage_rate,
+                "entry_edge": request.entry_edge,
+                "min_probability": request.min_probability,
+                "exit_return": request.exit_return,
+            }
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/v1/ml-backtests/{job_id}/progress", response_model=MLBacktestJobResponse)
