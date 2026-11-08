@@ -719,11 +719,12 @@ def export_strategy_report(strategy_id: str) -> bytes:
         z.writestr("README.txt", (
             "BTC/CASH LightGBM research audit\n"
             "strategy.json: strategy and optimization metadata\n"
-            "optimization_trials.csv: all attempted hyperparameter candidates\n"
+            "optimization_trials.csv: model and BTC/CASH policy candidates\n"
             "source_historical_audit.zip: immutable source data and labels\n"
             "final_execution_result.json: final OOS metrics when completed\n"
             "final_execution_parameters.json: LightGBM champion snapshot\n"
             "final_oos_audit.zip: all OOS predictions and OHLCV of the executed candidate\n"
+            "final_oos_capitalization.json: reinvested BTC/CASH curve, actions, risk and Buy-and-Hold\n"
             "Internal pre-OOS tuning is not proof of live profitability.\n"
         ))
         with SessionLocal() as session:
@@ -738,4 +739,22 @@ def export_strategy_report(strategy_id: str) -> bytes:
                 z.writestr("final_execution_parameters.json", job.settings_snapshot_json or "{}")
             if audit is not None:
                 z.writestr("final_oos_audit.zip", audit.archive_zip)
+                frozen = json.loads(job.settings_snapshot_json or "{}")
+                if frozen.get("policy.enabled") and source is not None:
+                    from .capitalization import compare_capitalization
+                    request = json.loads(job.request_json or "{}")
+                    financial = compare_capitalization(
+                        source.archive_zip, audit.archive_zip,
+                        horizon=0, initial_capital=10000,
+                        fee_rate=float(request.get("fee_rate", 0.001)),
+                        slippage_rate=float(request.get("slippage_rate", 0.0005)),
+                        entry_edge=0.0, min_probability=0.5, exit_return=0.0,
+                        optimized_policy={
+                            k: v for k, v in frozen.items() if k.startswith("policy.")
+                        },
+                    )
+                    z.writestr(
+                        "final_oos_capitalization.json",
+                        json.dumps(financial, ensure_ascii=False, indent=2, allow_nan=False),
+                    )
     return buffer.getvalue()
