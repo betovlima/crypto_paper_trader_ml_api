@@ -101,3 +101,52 @@ def test_one_click_never_executes_when_all_candidates_remain_cash(monkeypatch):
             assert len(executor.jobs) == 1
     finally:
         _cleanup(source)
+
+def test_one_click_rejects_single_trade_winner_before_final_oos(monkeypatch):
+    source = _insert_source()
+    _give_source_three_horizons(source)
+    executor = CapturedExecutor()
+    monkeypatch.setattr(service, "_get_executor", lambda params: executor)
+    _fast_tuning(monkeypatch, tradable=True)
+    monkeypatch.setattr(strategy_research, "_combine_horizon_metrics", lambda *args, **kwargs: {
+        "score": 0.18,
+        "capital_final": 10100,
+        "completed_cycles": 1,
+        "robustness": {
+            "passed": False,
+            "completed_cycles": 1,
+            "segment_cycle_counts": [0, 1, 0],
+            "active_segments": 0,
+            "profitable_segments": 1,
+            "stress_net_profit_usd": -25,
+            "reason_codes": ["MIN_CYCLES", "DISTRIBUTED_CYCLES",
+                             "STRESS_POSITIVE_NET_PROFIT"],
+        },
+        "entry_diagnostics": {"total_aligned_signals": 8},
+    })
+    try:
+        with TestClient(app) as client:
+            created = client.post("/v1/ml-strategies", json={
+                "name": "Research V9 robust rejection",
+                "source_job_id": source,
+            })
+            assert created.status_code == 201, created.text
+            sid = created.json()["id"]
+            started = client.post(f"/v1/ml-strategies/{sid}/optimize", json={
+                "mode": "QUICK", "trials": 4, "auto_execute": True,
+            })
+            assert started.status_code == 202, started.text
+            executor.jobs[0][0](*executor.jobs[0][1])
+            result = client.get(f"/v1/ml-strategies/{sid}").json()
+            assert result["status"] == "INSUFFICIENT_EVIDENCE"
+            assert result["execution_job_id"] is None
+            assert result["champion"] is None
+            assert result["summary"]["insufficient_evidence_trials"] == 4
+            assert len(result["summary"]["quality_by_trial"]) == 4
+            assert all(x["status"] == "INSUFFICIENT_EVIDENCE" for x in result["trials"])
+            assert len(executor.jobs) == 1
+            report = client.get(f"/v1/ml-strategies/{sid}/report.zip")
+            assert report.status_code == 200
+            assert report.content.startswith(b"PK")
+    finally:
+        _cleanup(source)
