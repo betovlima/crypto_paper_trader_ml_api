@@ -80,6 +80,81 @@ def _give_source_three_horizons(source_id: str) -> None:
         session.get(MLBacktestAudit, source_id).archive_zip = new_blob.getvalue()
 
 
+def test_entry_diagnostics_identifies_probability_and_edge_bottlenecks():
+    signals = {
+        1: {"p_up": 0.55, "predicted_return": .001, "positive_votes": 2},
+        2: {"p_up": 0.62, "predicted_return": .007, "positive_votes": 2},
+        3: {"p_up": 0.57, "predicted_return": .005, "positive_votes": 1},
+    }
+    policy = {
+        "policy.entry_probability": .56,
+        "policy.entry_edge": .002,
+        "policy.min_positive_votes": 2,
+    }
+    result = strategy_research._entry_diagnostics(signals, policy, .001, .0005)
+    assert result["total_aligned_signals"] == 3
+    assert result["passes_probability"] == 2
+    assert result["passes_votes"] == 2
+    assert result["passes_expected_return"] == 1
+    assert result["passes_all_entry_filters"] == 1
+    assert .005 < result["required_entry_return"] < .006
+
+
+def test_first_candidate_explores_possible_entries_before_random_search():
+    point = _next_candidate(
+        0, "QUICK", [], [],
+        qmc.LatinHypercube(d=len(strategy_research.SPACE), seed=42),
+        np.random.default_rng(42),
+    )
+    candidate = _candidate(point)
+    assert candidate["policy.entry_probability"] == .5
+    assert candidate["policy.entry_edge"] == 0
+    assert candidate["policy.min_positive_votes"] == 1
+
+
+def test_all_cash_campaign_reports_no_trades_and_does_not_select_a_champion(monkeypatch):
+    source = _insert_source()
+    _give_source_three_horizons(source)
+    try:
+        campaign = strategy_research.create_strategy(
+            name="Nenhuma compra permitida", source_job_id=source,
+        )
+        with SessionLocal.begin() as session:
+            row = session.get(MLResearchStrategy, campaign["id"])
+            row.status, row.mode, row.trials_target = "RUNNING", "QUICK", 4
+        candles = pd.DataFrame({
+            "timestamp": pd.date_range("2024-01-01", periods=12, freq="30min", tz="UTC"),
+            "open": np.full(12, 100.0),
+            "close": np.full(12, 100.0),
+        })
+        monkeypatch.setattr(strategy_research, "_prepare", lambda _a, h, _p, _c: (
+            candles, candles, candles, candles, [], h,
+            pd.Timestamp("2024-02-01", tz="UTC"),
+        ))
+        monkeypatch.setattr(strategy_research, "_score", lambda dataset, candidate, params: {
+            "brier": 0.25, "mae": 0.001,
+            "__policy_predictions": {
+                pd.Timestamp(ts).isoformat(): {
+                    "predicted_return": .0001 * dataset[5] / 6,
+                    "p_up": .51,
+                } for ts in dataset[3]["timestamp"]
+            },
+        })
+        strategy_research._run_optimization(campaign["id"])
+        result = strategy_research.get_strategy(campaign["id"])
+        assert result["status"] == "NO_TRADES", result.get("error_message")
+        assert result["champion"] is None
+        assert result["execution_job_id"] is None
+        assert result["summary"]["inactive_trials"] == 4
+        assert all(item["status"] == "NO_TRADES" for item in result["trials"])
+        assert all(item["metrics"]["entry_diagnostics"]["total_aligned_signals"] > 0 for item in result["trials"])
+        with pytest.raises(ValueError, match="Primeiro conclua"):
+            strategy_research.execute_strategy(campaign["id"])
+    finally:
+        _cleanup(source)
+
+
+
 def test_new_strategy_uses_all_horizons_and_rejects_incomplete_archive():
     source = _insert_source()
     try:
