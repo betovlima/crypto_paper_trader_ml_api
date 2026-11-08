@@ -11,7 +11,7 @@ from sqlalchemy import desc
 
 from .archive_replay import ArchivedMarketClient, compare_archives, inspect_source_archive
 from .capitalization import compare_capitalization
-from .database import MLBacktestAudit, MLBacktestJob, SessionLocal
+from .database import MLBacktestAudit, MLBacktestJob, MLResearchStrategy, SessionLocal
 from .engine import run_ml_backtest
 from .mexc import TIMEFRAME_SECONDS
 from .direct_forecast import run_direction_backtest
@@ -369,6 +369,18 @@ def _update_progress(job_id: str, progress: int, stage: str) -> None:
         job.stage = stage
 
 
+def _sync_strategy_status(session, job: MLBacktestJob) -> None:
+    research = session.query(MLResearchStrategy).filter(
+        MLResearchStrategy.execution_job_id == job.id
+    ).first()
+    if research is not None and job.status in {"COMPLETED", "FAILED", "CANCELLED"}:
+        research.status = job.status
+        research.updated_at = datetime.now(timezone.utc)
+        if job.status == "FAILED":
+            research.error_message = job.error_message
+
+
+
 def _run_job(job_id: str) -> None:
     with SessionLocal.begin() as session:
         job = session.get(MLBacktestJob, job_id)
@@ -437,6 +449,7 @@ def _run_job(job_id: str) -> None:
                 job.result_json = json.dumps(result, separators=(",", ":"), allow_nan=False)
                 session.add(MLBacktestAudit(job_id=job.id, archive_zip=archive_contents[0]))
             job.completed_at = datetime.now(timezone.utc)
+            _sync_strategy_status(session, job)
     except InterruptedError:
         with SessionLocal.begin() as session:
             job = session.get(MLBacktestJob, job_id)
@@ -444,6 +457,7 @@ def _run_job(job_id: str) -> None:
                 job.status = "CANCELLED"
                 job.stage = "Cancelled"
                 job.completed_at = datetime.now(timezone.utc)
+                _sync_strategy_status(session, job)
     except Exception as exc:
         logger.exception("ML backtest %s failed", job_id)
         with SessionLocal.begin() as session:
@@ -453,3 +467,4 @@ def _run_job(job_id: str) -> None:
                 job.stage = "Failed"
                 job.error_message = str(exc)
                 job.completed_at = datetime.now(timezone.utc)
+                _sync_strategy_status(session, job)
