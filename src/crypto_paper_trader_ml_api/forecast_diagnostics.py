@@ -5,8 +5,6 @@ not evidence of causal effects or investment returns.
 """
 from __future__ import annotations
 
-import json
-
 import numpy as np
 import pandas as pd
 from sklearn.metrics import brier_score_loss, mean_absolute_error, roc_auc_score
