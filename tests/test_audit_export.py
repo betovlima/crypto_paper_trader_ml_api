@@ -293,6 +293,11 @@ def test_audit_can_include_complete_training_history_and_fold_coverage():
         "label_horizon_candles": 12,
         "fold_windows": [{"fold": 1, "purge_candles_at_each_boundary": 12}],
         "history_coverage": {"raw_candles": 7, "coverage_status": "PARTIAL"},
+        "market_interruptions": {"30min": [{
+            "date": "2023-03-24",
+            "missing_candles": 2,
+            "market_status": "SPOT_TRADING_SUSPENDED",
+        }]},
     }
     content = build_audit_archive(
         predictions=frame, simulation=simulation, request=_request(),
@@ -306,3 +311,6 @@ def test_audit_can_include_complete_training_history_and_fold_coverage():
         assert len(_rows(z, "market_history_trend.csv")) == 7
         assert json.loads(z.read("folds.json"))[0]["purge_candles_at_each_boundary"] == 12
         assert json.loads(z.read("history_coverage.json"))["coverage_status"] == "PARTIAL"
+        interruptions = json.loads(z.read("market_interruptions.json"))
+        assert interruptions["30min"][0]["missing_candles"] == 2
+        assert json.loads(z.read("manifest.json"))["market_interruptions"] == interruptions
