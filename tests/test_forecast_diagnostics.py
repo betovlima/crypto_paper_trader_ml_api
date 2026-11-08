@@ -97,7 +97,7 @@ def test_calibration_diagnostics_preserve_raw_and_platt_test_probabilities():
     assert result["method"] == "identity"  # tiny calibration samples must not be overfit
     assert result["test_raw_unique"] == 4
     assert result["test_calibrated_unique"] == 4
-    assert result["calibration_coefficient"] is not None
+    assert result["calibration_coefficient"] is None
     assert sum(item["rows"] for item in result["test_raw_bins"]) == 4
     assert sum(item["rows"] for item in result["test_calibrated_bins"]) == 4
     assert result["test_raw_brier"] >= 0
