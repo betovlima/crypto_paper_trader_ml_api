@@ -585,6 +585,7 @@ def calculate_results(
             "walk_forward_folds": model_metadata["fold_count"],
             "decision_timeframe": request.decision_timeframe,
             "trend_timeframe": request.trend_timeframe,
+            "model_family": "LightGBM",
             "parameter_source": "DATABASE_SNAPSHOT",
             "fold_windows": model_metadata.get("fold_windows", []),
             "label_horizon_candles": model_metadata.get("label_horizon_candles"),
