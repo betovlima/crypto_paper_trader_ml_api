@@ -242,6 +242,7 @@ def compare_capitalization(
     slippage_rate: float, entry_edge: float,
     min_probability: float, exit_return: float,
     optimized_policy: dict | None = None,
+    full_audit: bool = False,
 ) -> dict:
     if optimized_policy is not None:
         validate_policy(optimized_policy)
@@ -295,6 +296,8 @@ def compare_capitalization(
             initial_capital=initial_capital, fee=fee_rate,
             slippage=slippage_rate, bar_seconds=seconds,
             label="BTC_CASH_ROTATION",
+            audit_limit=1000000 if full_audit else 200,
+            timeline_limit=None if full_audit else 500,
         )
         buy_hold = _summary_series(
             candles, {}, baseline=True, label="BUY_AND_HOLD", **common
