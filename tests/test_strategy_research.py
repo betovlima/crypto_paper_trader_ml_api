@@ -151,6 +151,42 @@ def test_single_api_supports_strategy_creation_and_bounded_tuning(monkeypatch):
         _cleanup(source)
 
 
+def test_optimization_freezes_all_model_settings_before_final_execution(monkeypatch):
+    source = _insert_source()
+    try:
+        saved = strategy_research.create_strategy(
+            name="Snapshot congelado", source_job_id=source, horizon_hours=2,
+        )
+        with SessionLocal.begin() as session:
+            row = session.get(MLResearchStrategy, saved["id"])
+            row.status, row.mode, row.trials_target = "RUNNING", "QUICK", 4
+        mock_data = pd.DataFrame({"timestamp": pd.date_range(
+            "2024-01-01", periods=5, freq="30min", tz="UTC"
+        )})
+        monkeypatch.setattr(strategy_research, "_prepare", lambda *args: (
+            mock_data, mock_data, mock_data, mock_data,
+            ["signal"], None, pd.Timestamp("2024-02-01", tz="UTC"),
+        ))
+        monkeypatch.setattr(strategy_research, "_score", lambda ds, candidate, params: {
+            "score": 0.1, "capital_final": 11000.0,
+            "max_drawdown": -0.08, "sharpe": 0.5,
+            "worst_fold_return": 0.01, "brier": 0.2, "mae": 0.001,
+            "buys": 2, "sells": 2, "return_total": 0.1,
+        })
+        strategy_research._run_optimization(saved["id"])
+        result = strategy_research.get_strategy(saved["id"])
+        assert result["status"] == "OPTIMIZED", result["error_message"]
+        assert len(result["trials"]) == 4
+        snapshot = result["champion"]["model_snapshot"]
+        assert "lightgbm.n_estimators" in snapshot
+        assert "forecast.regression_target_scale" in snapshot
+        assert snapshot["lightgbm.learning_rate"] == result["champion"]["parameters"]["lightgbm.learning_rate"]
+        assert result["summary"]["oos_untouched_from"].startswith("2024-02-01")
+    finally:
+        _cleanup(source)
+
+
+
 def test_strategy_final_execution_replays_original_archive_with_tuned_lightgbm(monkeypatch):
     source = _insert_source()
     worker = type("Worker", (), {"submit": lambda *args: None})()
