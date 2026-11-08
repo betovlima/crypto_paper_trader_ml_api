@@ -30,6 +30,7 @@ from .lightgbm_models import fit_classifier, fit_regressor
 from .mexc import TIMEFRAME_SECONDS
 from .settings_service import get_runtime_parameters, get_runtime_parameters_from_snapshot, RuntimeParameters
 from .engine import ProbabilityCalibrator
+from .btc_policy import DEFAULT_POLICY, aggregate_signals, simulate_rotations, validate_policy
 
 
 # Expose an intentionally small, well-bounded search space; optimize the
@@ -44,6 +45,23 @@ SPACE = (
     ("forecast.regression_learning_rate", "float", 0.015, 0.12),
 )
 MAX_DEV_CANDLES = 16000
+POLICY_SPACE = (
+    ("policy.entry_probability", "float", 0.51, 0.77),
+    ("policy.exit_probability", "float", 0.25, 0.49),
+    ("policy.entry_edge", "float", 0.0, 0.012),
+    ("policy.exit_return", "float", -0.018, 0.004),
+    ("policy.min_positive_votes", "int", 1, 3),
+    ("policy.stop_loss", "float", 0.012, 0.18),
+    ("policy.trailing_stop", "float", 0.012, 0.16),
+    ("policy.take_profit", "float", 0.02, 0.24),
+    ("policy.min_hold_bars", "int", 0, 24),
+    ("policy.cooldown_bars", "int", 0, 24),
+    ("policy.weight_2h", "float", 0.1, 1.0),
+    ("policy.weight_6h", "float", 0.1, 1.0),
+    ("policy.weight_24h", "float", 0.1, 1.0),
+)
+# Each candidate jointly changes the forecasters and their BTC/CASH rotation policy.
+SPACE = SPACE + POLICY_SPACE
 MAX_TRIALS = 40
 JOINT_HORIZONS = (2, 6, 24)
 
@@ -132,6 +150,12 @@ def _candidate(point: np.ndarray) -> dict:
     settings["forecast.regression_num_leaves"] = min(
         settings["forecast.regression_num_leaves"], 16
     )
+    settings["policy.exit_probability"] = min(
+        settings["policy.exit_probability"],
+        round(settings["policy.entry_probability"] - 0.02, 6),
+    )
+    settings["policy.enabled"] = True
+    validate_policy(settings)
     return settings
 
 
@@ -379,9 +403,15 @@ def _score(
         - 0.03 * mae
         - (0.01 if capital["buys"] == 0 else 0)
     )
+    predictions = {}
+    for row, p, estimate in zip(scoring.itertuples(index=False), probs, forecasts, strict=True):
+        predictions[pd.Timestamp(row.timestamp).isoformat()] = {
+            "predicted_return": float(estimate), "p_up": float(p),
+        }
     return {
         "score": float(score),
         "brier": brier, "mae": mae, **capital,
+        "__policy_predictions": predictions,
     }
 
 
@@ -483,7 +513,12 @@ def _run_optimization(strategy_id: str) -> None:
                 per_horizon = {
                     str(h): _score(datasets[h], candidate, base) for h in horizons
                 }
-                metrics = _combine_horizon_metrics(per_horizon)
+                metrics = _combine_horizon_metrics(
+                    per_horizon, scoring=datasets[2][3] if len(horizons) == 3 else None,
+                    policy=candidate, fee=original.fee_rate,
+                    slippage=original.slippage_rate,
+                    bar_seconds=TIMEFRAME_SECONDS[original.decision_timeframe],
+                )
                 score = metrics["score"]
                 entry = {"trial": index + 1, "status": "COMPLETED",
                          "parameters": candidate, "metrics": metrics}
@@ -523,11 +558,17 @@ def _run_optimization(strategy_id: str) -> None:
             "oos_untouched_from": first_oos.isoformat(),
             "horizons_hours": list(horizons),
             "training_rows_by_horizon": training_counts,
-            "aggregation_method": "0.70 mean economic score + 0.30 worst-horizon score",
+            "aggregation_method": "Single compounded BTC/CASH portfolio; final capital with risk and temporal stability",
+            "optimization_target": "NET_COMPOUNDED_BTC_CASH_CAPITAL",
+            "optimized_decision_policy": True,
+            "capitalization_engine": "btc_policy.simulate_rotations",
+            "objective_note": "Stops confirmed at close; filled at next open; final OOS untouched",
             "model_family": "LightGBM",
             "optimization_algorithm": ("CRYPTO_CARO_GP_CONSTRAINED_EI" if mode == "BAYESIAN" else "LATIN_HYPERCUBE"),
             "caro_note": "Crypto adaptation using sklearn GPs, not the MCT BoTorch engine.",
             "selected_score": best_score,
+            "candidate_policy": validate_policy(winner["parameters"]),
+            "initial_capital_for_selection": 10000,
             "completed_trials": sum(item["status"] == "COMPLETED" for item in records),
             "failed_trials": sum(item["status"] == "FAILED" for item in records),
             "historical_source_job_id": row.source_job_id,
