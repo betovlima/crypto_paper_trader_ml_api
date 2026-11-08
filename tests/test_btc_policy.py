@@ -106,6 +106,28 @@ def test_reentry_cooldown_and_single_operation_per_candle():
     assert result["exposure"] < 1
 
 
+def test_favorable_return_votes_are_not_blocked_by_50_percent_probabilities():
+    instant = "2024-01-01T00:30:00+00:00"
+    by_horizon = {
+        2: {1: {"signal_at": instant, "predicted_return": .008, "p_up": .43}},
+        6: {1: {"signal_at": instant, "predicted_return": .013, "p_up": .46}},
+        24: {1: {"signal_at": instant, "predicted_return": -.01, "p_up": .42}},
+    }
+    choice = {**DEFAULT_POLICY, "policy.entry_probability": .38,
+              "policy.exit_probability": .25,
+              "policy.min_positive_votes": 2, "policy.entry_edge": 0.0}
+    signal = aggregate_signals(by_horizon, choice)
+    assert signal[1]["positive_votes"] == 2
+    assert signal[1]["probability_votes"] == 0
+    assert .40 < signal[1]["p_up"] < .5
+    bars = _candles([(100,100), (100,100), (102,103), (105,105), (106,106)])
+    decisions = {1: signal[1], 2: {**signal[1], "signal_at": bars[2]["timestamp"].isoformat()}}
+    result = simulate_rotations(bars, decisions, choice, fee=.001, slippage=.0005)
+    assert result["completed_cycles"] == 1
+    assert result["actions"][0]["reason"] == "MODEL_ENTRY"
+    assert result["actions"][0]["probability_up"] < .5
+
+
 def test_joint_forecast_weights_and_vote_threshold_validation():
     timestamp = "2024-01-01T00:30:00+00:00"
     inputs = {
