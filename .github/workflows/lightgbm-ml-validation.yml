@@ -6,6 +6,7 @@ on:
       - feature/lightgbm-ml-replacement-v3-20261108
       - feature/crypto-research-workspace-v4-20261108
       - feature/btc-capital-rotation-policy-v5-20261108
+      - feature/one-click-btc-research-v6-20261108
   workflow_dispatch:
 
 jobs:
