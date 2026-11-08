@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 class MLBacktestCreate(BaseModel):
     symbol: str | None = None
+    history_source: Literal["MEXC", "BINANCE_SPOT_ARCHIVE"] | None = None
     period_years: int | None = None
     decision_timeframe: str | None = None
     trend_timeframe: str | None = None
@@ -31,6 +32,7 @@ class MLBacktestCreate(BaseModel):
 
 class ResolvedMLBacktestCreate(BaseModel):
     symbol: str
+    history_source: Literal["MEXC", "BINANCE_SPOT_ARCHIVE"] = "MEXC"
     period_years: int
     decision_timeframe: str
     trend_timeframe: str
@@ -44,6 +46,7 @@ class ResolvedMLBacktestCreate(BaseModel):
 
 class MLBacktestJobResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
+    history_source: Literal["MEXC", "BINANCE_SPOT_ARCHIVE"] = "MEXC"
 
     id: str
     status: str

@@ -12,6 +12,7 @@ from xgboost import XGBClassifier
 
 from . import __version__
 from .audit_export import build_audit_archive
+from .binance_archive import BinancePublicArchiveClient
 from .features import atr_column, build_features, create_labels, feature_names, signal_ema_columns
 from .mexc import MEXCHistoryClient, TIMEFRAME_SECONDS
 from .rotation_analysis import build_rotation_timeline
@@ -607,6 +608,7 @@ def calculate_results(
             "fold_windows": model_metadata.get("fold_windows", []),
             "label_horizon_candles": model_metadata.get("label_horizon_candles"),
             "history_coverage": model_metadata.get("history_coverage"),
+            "history_source": request.history_source,
             "label_vs_execution": model_metadata.get("target_vs_simulation"),
         },
         "models": {
@@ -666,7 +668,11 @@ def run_ml_backtest(
     cancelled: Callable[[], bool],
     audit_writer: Callable[[bytes], None] | None = None,
 ) -> dict:
-    client = MEXCHistoryClient(parameters, __version__)
+    client = (
+        BinancePublicArchiveClient(parameters, __version__)
+        if request.history_source == "BINANCE_SPOT_ARCHIVE"
+        else MEXCHistoryClient(parameters, __version__)
+    )
     try:
         progress(3, "Downloading decision-timeframe history")
         decision = client.fetch_history(
@@ -710,7 +716,10 @@ def run_ml_backtest(
             (raw_end - raw_start).total_seconds() / expected_seconds
         )) + 1
         observed_coverage = min(1.0, available_intervals / max(1, requested_candles))
+        metadata["history_source"] = request.history_source
+        metadata["source_archives"] = getattr(client, "archive_manifest", None)
         metadata["history_coverage"] = {
+            "source": request.history_source,
             "requested_years": request.period_years,
             "requested_candles": requested_candles,
             "max_candles_parameter": parameters.integer("market.max_candles"),

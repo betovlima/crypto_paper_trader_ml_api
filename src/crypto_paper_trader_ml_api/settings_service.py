@@ -106,6 +106,24 @@ def synchronize_parameter_catalog() -> None:
         existing_keys = {
             item.key for item in session.query(MLRuntimeParameter.key).all()
         }
+        # Database migration: add the explicitly selectable research source
+        # without modifying existing parameter values or storing it in .env.
+        if "backtest.default_history_source" not in existing_keys:
+            session.add(MLRuntimeParameter(
+                key="backtest.default_history_source",
+                category="Backtest",
+                label="Default historical market source",
+                description="MEXC historical candles or separately identified Binance Spot archives. Never blend sources.",
+                value_type="string",
+                value_json=json.dumps("MEXC"),
+                constraints_json=json.dumps({
+                    "options": ["MEXC", "BINANCE_SPOT_ARCHIVE"]
+                }),
+                public=True,
+                requires_restart=False,
+                display_order=110,
+                updated_at=now,
+            ))
         for seed in seed_rows:
             if seed["key"] in existing_keys:
                 if seed["key"] == "api.cors_origins":
@@ -292,6 +310,11 @@ def _validate_cross_parameter_values(values: dict[str, Any]) -> None:
     if int(values["walk_forward.initial_train_minimum"]) >= int(values["walk_forward.minimum_usable_candles"]):
         raise ParameterValidationError("The initial training minimum must be lower than the minimum usable candles")
 
+    if values.get("backtest.default_history_source", "MEXC") not in {
+        "MEXC", "BINANCE_SPOT_ARCHIVE",
+    }:
+        raise ParameterValidationError("Unsupported default history source")
+
     if int(values["market.max_candles"]) < int(values["market.minimum_raw_candles"]):
         raise ParameterValidationError("market.max_candles must be greater than the minimum raw candles")
     if int(values["market.page_window_candles"]) > int(values["market.page_limit"]):
@@ -382,6 +405,7 @@ def public_configuration_payload() -> dict[str, Any]:
         "source": "DATABASE",
         "defaults": {
             "symbol": runtime.string("backtest.default_symbol"),
+            "history_source": runtime.string("backtest.default_history_source"),
             "period_years": runtime.integer("backtest.default_period_years"),
             "decision_timeframe": runtime.string("backtest.default_decision_timeframe"),
             "trend_timeframe": runtime.string("backtest.default_trend_timeframe"),
@@ -402,6 +426,7 @@ def public_configuration_payload() -> dict[str, Any]:
             "maximum_probability_threshold": runtime.floating("backtest.maximum_probability_threshold"),
         },
         "options": {
+            "history_sources": ["MEXC", "BINANCE_SPOT_ARCHIVE"],
             "decision_timeframes": runtime.list("backtest.allowed_decision_timeframes"),
             "trend_timeframes": runtime.list("backtest.allowed_trend_timeframes"),
         },

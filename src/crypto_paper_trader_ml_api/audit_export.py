@@ -94,6 +94,8 @@ def build_audit_archive(
         "kind": "CRYPTO_PAPER_TRADER_ML_AUDIT",
         "scope": "OUT_OF_SAMPLE",
         "symbol": request.symbol,
+        "market_history_source": request.history_source,
+        "market_archive_checksums": model_metadata.get("source_archives"),
         "decision_timeframe": request.decision_timeframe,
         "trend_timeframe": request.trend_timeframe,
         "candles": len(complete_trace),

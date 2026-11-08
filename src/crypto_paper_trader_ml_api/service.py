@@ -48,6 +48,7 @@ def _serialize_job(job: MLBacktestJob, include_result: bool = False) -> dict:
         "stage": job.stage,
         "progress": job.progress,
         "symbol": job.symbol,
+        "history_source": json.loads(job.request_json).get("history_source", "MEXC"),
         "decision_timeframe": job.decision_timeframe,
         "trend_timeframe": job.trend_timeframe,
         "period_years": job.period_years,
@@ -70,6 +71,7 @@ def _serialize_job(job: MLBacktestJob, include_result: bool = False) -> dict:
 def _resolve_request(request: MLBacktestCreate, parameters: RuntimeParameters) -> ResolvedMLBacktestCreate:
     values = {
         "symbol": request.symbol or parameters.string("backtest.default_symbol"),
+        "history_source": request.history_source or parameters.string("backtest.default_history_source"),
         "period_years": (
             request.period_years
             if request.period_years is not None
