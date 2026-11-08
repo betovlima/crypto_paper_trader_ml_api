@@ -70,6 +70,40 @@ def _all_horizon_forecasts(predicted: float) -> bytes:
     return output.getvalue()
 
 
+def test_optimized_policy_capitalization_uses_one_portfolio_and_benchmark_only():
+    from crypto_paper_trader_ml_api.btc_policy import DEFAULT_POLICY
+    report = compare_capitalization(
+        _all_horizon_forecasts(.0001),
+        _all_horizon_forecasts(.015),
+        **{**_options(), "horizon": 0},
+        optimized_policy={**DEFAULT_POLICY, "policy.entry_probability": .52,
+                          "policy.min_hold_bars": 0, "policy.cooldown_bars": 1},
+    )
+    assert report["status"] == "VERIFIED"
+    assert report["portfolio_rule"] is not None
+    assert report["optimized_policy"]["policy.enabled"]
+    assert [row["code"] for row in report["results"]] == [
+        "BTC_CASH_ROTATION", "BUY_AND_HOLD",
+    ]
+    rotation, baseline = report["results"]
+    assert rotation["initial_capital"] == baseline["initial_capital"] == 10000
+    assert rotation["switch_count"] >= 2
+    assert rotation["actions"][0]["action"] == "BUY"
+    assert all(row["capital_after"] >= 0 for row in rotation["actions"])
+    assert rotation["execution_rule"].startswith("Prior candle close")
+
+
+def test_optimized_policy_rejects_isolated_horizon():
+    from crypto_paper_trader_ml_api.btc_policy import DEFAULT_POLICY
+    with pytest.raises(ValueError, match="conjuntamente"):
+        compare_capitalization(
+            _all_horizon_forecasts(.0001),
+            _all_horizon_forecasts(.015),
+            **_options(), optimized_policy=DEFAULT_POLICY,
+        )
+
+
+
 def test_joint_signal_requires_two_positive_horizons_and_same_timestamp():
     start = datetime(2024, 1, 1, tzinfo=timezone.utc)
     signal_at = start.isoformat()
