@@ -415,31 +415,82 @@ def _score(
     }
 
 
-def _combine_horizon_metrics(results: dict[str, dict]) -> dict:
-    """One common model candidate across 2h/6h/24h, not three campaigns.
-
-    Individual horizon capital paths are independent; their mean is only a
-    descriptive metric, never a fabricated blended BTC/CASH portfolio.
-    """
-    values = list(results.values())
-    if not values:
+def _combine_horizon_metrics(
+    results: dict[str, dict],
+    *, scoring: pd.DataFrame | None = None, policy: dict | None = None,
+    fee: float = .001, slippage: float = .0005, bar_seconds: int = 1800,
+) -> dict:
+    """Score ONE fully reinvested multi-horizon portfolio, not mean of accounts."""
+    if not results:
         raise ValueError("Nenhuma previsão disponível para otimização")
-    if len(values) == 1:
-        return {**values[0], "per_horizon": results, "score_method": "single"}
-    scores = np.asarray([v["score"] for v in values], dtype=float)
+    if len(results) == 1:
+        row = next(iter(results.values()))
+        clean = {k: v for k, v in row.items() if not k.startswith("__")}
+        return {**clean, "per_horizon": {"2": clean}, "score_method": "single_legacy"}
+    if scoring is None or policy is None or len(results) != 3:
+        raise ValueError("A estratégia conjunta exige os três horizontes e candles alinhados")
+    cfg = validate_policy(policy)
+    candles, indices = [], {}
+    for i, row in enumerate(scoring.itertuples(index=False)):
+        stamp = pd.Timestamp(row.timestamp)
+        indices[stamp.isoformat()] = i
+        candles.append({"timestamp": stamp.to_pydatetime(),
+                        "open": float(row.open), "close": float(row.close)})
+    signals_by_horizon = {}
+    for h in JOINT_HORIZONS:
+        horizon_signals = {}
+        for timestamp, prediction in results[str(h)]["__policy_predictions"].items():
+            prior = indices.get(timestamp)
+            if prior is None or prior + 1 >= len(candles):
+                continue
+            nxt = prior + 1
+            if (candles[nxt]["timestamp"] - candles[prior]["timestamp"]).total_seconds() != bar_seconds:
+                continue
+            horizon_signals[nxt] = {**prediction, "signal_at": candles[nxt]["timestamp"].isoformat()}
+        signals_by_horizon[h] = horizon_signals
+    joint_signals = aggregate_signals(signals_by_horizon, cfg)
+    simulated = simulate_rotations(
+        candles, joint_signals, cfg, initial_capital=10000,
+        fee=fee, slippage=slippage, bar_seconds=bar_seconds,
+    )
+    capital = simulated["capital_final"]
+    dd = simulated["max_drawdown"]
+    worst = simulated["worst_fold_return"]
+    sharpe = simulated["sharpe"]
+    score = (
+        math.log(max(1e-9, capital / 10000))
+        + .5 * dd + .28 * min(0.0, worst)
+        + .01 * float(np.clip(sharpe, -4, 4))
+        - .01 * float(simulated["completed_cycles"] == 0)
+    )
     return {
-        "score": float(0.70 * np.mean(scores) + 0.30 * np.min(scores)),
-        "score_method": "0.70_mean_0.30_worst",
-        "capital_final": float(np.mean([v["capital_final"] for v in values])),
-        "capital_final_worst": float(min(v["capital_final"] for v in values)),
-        "capital_note": "Média de simulações independentes, não carteira multi-horizonte consolidada",
-        "return_total": float(np.mean([v["return_total"] for v in values])),
-        "max_drawdown": float(min(v["max_drawdown"] for v in values)),
-        "worst_fold_return": float(min(v["worst_fold_return"] for v in values)),
-        "sharpe": float(min(v["sharpe"] for v in values)),
-        "brier": float(np.mean([v["brier"] for v in values])),
-        "mae": float(np.mean([v["mae"] for v in values])),
-        "per_horizon": results,
+        "score": float(score),
+        "score_method": "joint_compounded_capital_risk_adjusted",
+        "capital_final": capital,
+        "return_total": simulated["total_return"],
+        "max_drawdown": dd,
+        "worst_fold_return": worst,
+        "sharpe": sharpe,
+        "buys": simulated["completed_cycles"],
+        "sells": simulated["completed_cycles"],
+        "wins": simulated["wins"],
+        "losses": simulated["losses"],
+        "win_rate": simulated["win_rate"],
+        "profit_factor": simulated["profit_factor"],
+        "fees_paid": simulated["fees_paid"],
+        "exposure": simulated["exposure"],
+        "switch_count": simulated["switch_count"],
+        "brier": float(np.mean([v["brier"] for v in results.values()])),
+        "mae": float(np.mean([v["mae"] for v in results.values()])),
+        "per_horizon": {
+            str(h): {
+                "brier": results[str(h)]["brier"],
+                "mae": results[str(h)]["mae"],
+                "signal_count": len(signals_by_horizon[h]),
+            } for h in JOINT_HORIZONS
+        },
+        "capital_note": "Um patrimônio BTC/CASH reinvestido; custos incluídos",
+        "policy": cfg,
     }
 
 
