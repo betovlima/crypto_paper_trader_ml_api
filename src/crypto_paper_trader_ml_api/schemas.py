@@ -74,6 +74,16 @@ class MLBacktestJobDetail(MLBacktestJobResponse):
     result: dict | None
 
 
+class BTCCapitalizationRequest(BaseModel):
+    horizon_hours: Literal[2, 6, 24] = 2
+    initial_capital: float = Field(default=10000.0, gt=0, le=1000000000)
+    fee_rate: float = Field(default=0.001, ge=0, le=0.05)
+    slippage_rate: float = Field(default=0.0005, ge=0, le=0.05)
+    entry_edge: float = Field(default=0, ge=0, le=0.2)
+    min_probability: float = Field(default=0.5, ge=0, le=1)
+    exit_return: float = Field(default=0, ge=-0.2, le=0.2)
+
+
 class HealthResponse(BaseModel):
     status: str
     service: str
