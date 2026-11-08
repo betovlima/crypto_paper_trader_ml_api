@@ -187,6 +187,7 @@ def test_full_direction_job_routes_to_research_engine_and_writes_audit(monkeypat
     from crypto_paper_trader_ml_api import direct_forecast
 
     raw = synthetic_candles(180)
+    fetched_timeframes = []
 
     class FakeMarket:
         archive_manifest = {"30min": [{"sha256": "test-verified"}]}
@@ -197,7 +198,10 @@ def test_full_direction_job_routes_to_research_engine_and_writes_audit(monkeypat
 
         def fetch_history(self, *, symbol, timeframe, period_years, progress, cancelled):
             assert symbol == "BTCUSDT"
-            assert timeframe == "30min"
+            assert timeframe in {"30min", "4hour"}
+            fetched_timeframes.append(timeframe)
+            if timeframe == "4hour":
+                return raw.iloc[::8].reset_index(drop=True).copy()
             return raw.copy()
 
         def close(self):
@@ -223,13 +227,14 @@ def test_full_direction_job_routes_to_research_engine_and_writes_audit(monkeypat
     params = default_parameters(**{"forecast.horizons_hours": [2, 6, 24]})
     request = _resolve_request(MLBacktestCreate(
         experiment_type="BTC_DIRECTION_RETURN", symbol="BTCUSDT",
-        decision_timeframe="30min", trend_timeframe="30min",
+        decision_timeframe="30min", trend_timeframe="4hour",
     ), params)
     archives = []
     result = direct_forecast.run_direction_backtest(
         request, params, lambda _value, _stage: None,
         lambda: False, audit_writer=archives.append,
     )
+    assert fetched_timeframes == ["30min", "4hour"]
     assert result["experiment_type"] == "BTC_DIRECTION_RETURN"
     assert result["summary"]["financial_trading_enabled"] is False
     assert result["trades"] == []
