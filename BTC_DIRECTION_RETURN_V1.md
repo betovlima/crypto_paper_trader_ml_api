@@ -6,33 +6,33 @@ Separar o problema **prever o movimento do BTC** da antiga estratégia que
 prevê o atingimento de alvos e stops e depois tenta operar BTC/CASH.
 
 As duas experiências coexistem na mesma ML API e possuem IDs, parâmetros
-e ZIPs independentes. O padrão permanece \`TARGET_STOP\` e a main não
+e ZIPs independentes. O padrão permanece `TARGET_STOP` e a main não
 foi modificada. Não existem ordens reais nem simuladas neste novo modo.
 
 ## Seleção na tela
 
 Na aba **ML Backtest → Nova execução**, escolher:
 
-- **Tipo de experimento:** \`BTC Direction & Return\`
-- **Fonte histórica:** \`Binance Spot Archive\`
-- **Símbolo:** \`BTCUSDT\`
-- **Período:** \`4 anos\`
-- **Candle de decisão:** \`30min\`
-- **Candle de tendência:** \`4hour\`
+- **Tipo de experimento:** `BTC Direction & Return`
+- **Fonte histórica:** `Binance Spot Archive`
+- **Símbolo:** `BTCUSDT`
+- **Período:** `4 anos`
+- **Candle de decisão:** `30min`
+- **Candle de tendência:** `4hour`
 
-As opções \`backtest.default_experiment_type\`, \`forecast.horizons_hours\`
-e \`forecast.maximum_folds\` ficam no banco e podem ser ajustadas
+As opções `backtest.default_experiment_type`, `forecast.horizons_hours`
+e `forecast.maximum_folds` ficam no banco e podem ser ajustadas
 no painel **Parâmetros**. Valores iniciais: modo legado, horizontes
 de 2/6/24 horas e três folds no modelo direto. Não existem parâmetros
-\`.env\` de negociação para este experimento.
+`.env` de negociação para este experimento.
 
 ## Definição dos alvos
 
-Para o candle que fechou em \`t\`, e horizonte \`h\`, definimos:
+Para o candle que fechou em `t`, e horizonte `h`, definimos:
 
-\`future_return_h = close[t+h] / close[t] - 1\`
+`future_return_h = close[t+h] / close[t] - 1`
 
-\`future_up_h = 1 se future_return_h > 0; caso contrário 0\`.
+`future_up_h = 1 se future_return_h > 0; caso contrário 0`.
 
 O alvo é o fechamento futuro, **não** o maior preço futuro.
 Cada horizonte tem modelos de classificação e regressão separados.
@@ -51,7 +51,7 @@ ou na avaliação. Preços faltantes nunca são interpolados.
 2. Treino XGBoost para classificação da direção e regressão do retorno.
 3. Separação cronológica de quatro partições: treino, validação para
    early stopping, calibração de probabilidade e teste fora da amostra.
-4. Expurgo entre as partições por horizonte \`h\` e verificação adicional
+4. Expurgo entre as partições por horizonte `h` e verificação adicional
    do timestamp em que o alvo já seria conhecido.
 5. Testes walk-forward com número de folds definido no banco e parâmetros
    congelados durante cada execução.
@@ -78,14 +78,14 @@ avalia uma política de capital ou decisões BTC/CASH.
 O botão **Exportar auditoria ZIP**, na aba BTC Forecast, exporta
 arquivos completos e não reduzidos para exibição:
 
-- \`manifest.json\`: tipo, origem, checksums e horizontes
-- \`forecast_predictions_oos.csv\`: todas as previsões, retornos
+- `manifest.json`: tipo, origem, checksums e horizontes
+- `forecast_predictions_oos.csv`: todas as previsões, retornos
   realizados, probabilidades, folds e atributos usados
-- \`forecast_metrics.json\`: métricas por horizonte e por fold
-- \`folds.json\`: datas, dimensões e expurgos
-- \`history_coverage.json\` e \`market_interruptions.json\`
-- \`parameters_snapshot.json\` e \`request.json\`
-- \`market_history_decision.csv\` e \`market_history_trend.csv\`
+- `forecast_metrics.json`: métricas por horizonte e por fold
+- `folds.json`: datas, dimensões e expurgos
+- `history_coverage.json` e `market_interruptions.json`
+- `parameters_snapshot.json` e `request.json`
+- `market_history_decision.csv` e `market_history_trend.csv`
 
 Previsões antigas nunca são reestimadas com o modelo de hoje.
 
@@ -109,9 +109,9 @@ proximidade dos topos ficam para a etapa posterior.
 
 ## Testes de validação local
 
-\`\`\`bash
+```bash
 git fetch origin
 git switch --track origin/feature/btc-direction-return-v1-20261107
 poetry run python -m pytest tests/test_direct_forecast.py -v
 poetry run python -m pytest -v
-\`\`\`
+```
