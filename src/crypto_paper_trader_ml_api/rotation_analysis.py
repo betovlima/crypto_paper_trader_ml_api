@@ -1,7 +1,7 @@
 """Retrospective BTC/CASH rotation analysis, using effective simulated positions.
 
-A peak uses closing prices up through the displayed candle only. It is
-not a trading signal at that candle's opening.
+Each peak uses only closing prices observed by the relevant time. Distances
+computed at candle close are analytical, not signals at candle opening.
 """
 
 from __future__ import annotations
@@ -9,8 +9,26 @@ from __future__ import annotations
 import math
 
 
+def _actions_with_peak_distance(
+    actions: list[dict], previous_peak: float | None, closing_peak: float
+) -> list[dict]:
+    recorded = []
+    for action in actions:
+        # Normal orders execute at the candle open or intrabar. Terminal
+        # liquidation executes at the last close, which is already known then.
+        available_peak = (
+            closing_peak if action.get("reason") == "END_OF_TEST" else previous_peak
+        )
+        distance = (
+            float(action["execution_price"]) / available_peak - 1.0
+            if available_peak is not None else None
+        )
+        recorded.append({**action, "distance_to_peak_at_execution": distance})
+    return recorded
+
+
 def build_rotation_timeline(rows: list[dict], maximum_points: int) -> list[dict]:
-    """Sample the actual candle history while preserving every executed switch."""
+    """Sample historical prices while preserving every executed BTC/CASH switch."""
     if not rows:
         return []
     if maximum_points < 1:
@@ -19,7 +37,9 @@ def build_rotation_timeline(rows: list[dict], maximum_points: int) -> list[dict]
     stride = max(1, math.ceil(len(rows) / maximum_points))
     important = {0, len(rows) - 1}
     for index, row in enumerate(rows):
-        if row.get("actions") or (index > 0 and row["position"] != rows[index - 1]["position"]):
+        if row.get("actions") or (
+            index > 0 and row["position"] != rows[index - 1]["position"]
+        ):
             important.add(index)
 
     high_water_close = float("-inf")
@@ -41,19 +61,9 @@ def build_rotation_timeline(rows: list[dict], maximum_points: int) -> list[dict]
                 "position": row["position"],
                 "equity": float(row["equity"]),
                 "buy_hold": float(row["buy_hold"]),
-                "actions": [
-                    {
-                        **action,
-                        "distance_to_previous_peak": (
-                            float(action["execution_price"])
-                            / (high_water_close if action.get("reason") == "END_OF_TEST" else previous_peak)
-                            - 1.0
-                        )
-                        if (high_water_close if action.get("reason") == "END_OF_TEST" else previous_peak)
-                        else None,
-                    }
-                    for action in row.get("actions", [])
-                ],
+                "actions": _actions_with_peak_distance(
+                    row.get("actions", []), previous_peak, high_water_close
+                ),
             }
         )
     return timeline
