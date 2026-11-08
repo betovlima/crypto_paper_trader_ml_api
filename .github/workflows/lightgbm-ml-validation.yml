@@ -9,6 +9,7 @@ on:
       - feature/one-click-btc-research-v6-20261108
       - feature/btc-calibrated-capital-v7-20261108
       - feature/alpaca-crypto-fees-v8-20261108
+      - feature/btc-robust-capital-v9-20261108
   workflow_dispatch:
 
 jobs:
