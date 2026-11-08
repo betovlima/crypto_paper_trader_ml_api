@@ -128,7 +128,7 @@ def _parse_zip(payload: bytes, expected_name: str, *, cutoff_ms: int) -> list[di
 
 
 class BinancePublicArchiveClient:
-    """Read official immutable monthly/daily spot archives with SHA256 checks."""
+    """Read checksum-verified monthly/daily spot archives with SHA256 checks."""
 
     def __init__(
         self,
