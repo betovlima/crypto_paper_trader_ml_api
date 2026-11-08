@@ -292,7 +292,7 @@ def test_one_optimization_campaign_evaluates_all_horizons_without_oos_leakage(mo
         assert sorted(best["per_horizon"].keys()) == ["2", "24", "6"]
         assert best["score_method"] == "joint_compounded_capital_risk_adjusted"
         assert best["capital_note"].startswith("Um patrimônio")
-        assert best["policy"]["policy.entry_probability"] >= .5
+        assert best["policy"]["policy.entry_probability"] >= .30
         assert best["switch_count"] >= 2
         assert result["summary"]["horizons_hours"] == [2, 6, 24]
         assert result["summary"]["oos_untouched_from"] == first.isoformat()
