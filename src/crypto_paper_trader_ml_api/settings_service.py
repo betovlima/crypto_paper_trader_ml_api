@@ -184,7 +184,7 @@ def synchronize_parameter_catalog() -> None:
           {
             "key": "forecast.regression_n_estimators",
             "category": "BTC Forecast",
-            "label": "Regressor maximum XGBoost trees",
+            "label": "Regressor maximum LightGBM trees",
             "description": "Editable forecast research parameter stored in the runtime database.",
             "value_type": "integer",
             "value": 350,
@@ -318,12 +318,12 @@ def synchronize_parameter_catalog() -> None:
           }
         ]
         explanations = {
-            "forecast.regression_target_scale": "Factor multiplying simple BTC returns during XGBoost regression fit; predictions are divided back before export.",
+            "forecast.regression_target_scale": "Factor multiplying simple BTC returns during LightGBM regression fit; predictions are divided back before export.",
             "forecast.regression_n_estimators": "Upper limit on regression tree boosting rounds; early stopping may select fewer.",
             "forecast.regression_max_depth": "Maximum number of successive splitting levels per regression tree.",
             "forecast.regression_learning_rate": "Shrinkage applied to each added regression tree.",
-            "forecast.regression_min_child_weight": "Minimum Hessian weight required for an XGBoost regression split.",
-            "forecast.regression_gamma": "Minimum loss reduction required for each tree split, in scaled training-target units.",
+            "forecast.regression_min_child_weight": "Minimum sum of Hessian weights permitted in a LightGBM regression leaf.",
+            "forecast.regression_gamma": "LightGBM min_split_gain: minimum reduction in loss for a tree split.",
             "forecast.regression_reg_alpha": "L1 penalty applied to regression leaf weights.",
             "forecast.regression_reg_lambda": "L2 penalty applied to regression leaf weights.",
             "forecast.regression_early_stopping_rounds": "Stop if validation RMSE does not improve for this many boosting rounds.",
@@ -332,6 +332,80 @@ def synchronize_parameter_catalog() -> None:
         for item in regression_defaults:
             item["description"] = explanations[item["key"]]
         forecast_defaults.extend(regression_defaults)
+        # Preserve generic regression keys and their configured values. LightGBM
+        # adds leaf-specific complexity controls without overwriting old research.
+        new_definitions = [
+            ("forecast.regression_num_leaves", "BTC Forecast",
+             "Regressor maximum leaves", "Maximum leaves per LightGBM regression tree",
+             "integer", 15, 2, 255, 124),
+            ("forecast.regression_min_child_samples", "BTC Forecast",
+             "Regressor minimum rows per leaf", "Minimum examples per regression leaf",
+             "integer", 20, 1, 1000, 125),
+            ("lightgbm.n_estimators", "LightGBM",
+             "Classifier maximum boosting rounds", "Maximum LightGBM classifier trees",
+             "integer", 350, 20, 2000, 201),
+            ("lightgbm.learning_rate", "LightGBM",
+             "Classifier learning rate", "Shrinkage of each LightGBM classifier update",
+             "float", 0.04, 0.001, 0.5, 202),
+            ("lightgbm.max_depth", "LightGBM",
+             "Classifier maximum depth", "Maximum depth of each LightGBM classifier tree",
+             "integer", 4, 1, 12, 203),
+            ("lightgbm.num_leaves", "LightGBM",
+             "Classifier maximum leaves", "Maximum leaves per LightGBM classifier tree",
+             "integer", 15, 2, 255, 204),
+            ("lightgbm.min_child_samples", "LightGBM",
+             "Classifier minimum rows per leaf", "Minimum training rows per leaf",
+             "integer", 20, 1, 1000, 205),
+            ("lightgbm.min_child_weight", "LightGBM",
+             "Minimum Hessian sum per leaf", "Minimum Hessian sum per LightGBM leaf",
+             "float", 0.001, 0, 200, 206),
+            ("lightgbm.min_split_gain", "LightGBM",
+             "Minimum split gain", "Minimum loss reduction required to split a node",
+             "float", 0, 0, 1000, 207),
+            ("lightgbm.subsample", "LightGBM",
+             "Row sampling fraction", "Training-row fraction used when subsample_freq > 0",
+             "float", 0.85, 0.1, 1, 208),
+            ("lightgbm.subsample_freq", "LightGBM",
+             "Row sampling frequency", "Apply row sampling every N trees, 0 disables it",
+             "integer", 1, 0, 100, 209),
+            ("lightgbm.colsample_bytree", "LightGBM",
+             "Feature sampling fraction", "Fraction of indicators sampled per tree",
+             "float", 0.85, 0.1, 1, 210),
+            ("lightgbm.reg_alpha", "LightGBM",
+             "L1 leaf regularization", "L1 penalty on leaf weights",
+             "float", 0.1, 0, 1000, 211),
+            ("lightgbm.reg_lambda", "LightGBM",
+             "L2 leaf regularization", "L2 penalty on leaf weights",
+             "float", 2.0, 0, 1000, 212),
+            ("lightgbm.max_bin", "LightGBM",
+             "Histogram maximum bins", "Maximum histogram bins for continuous features",
+             "integer", 255, 16, 511, 213),
+            ("lightgbm.n_jobs", "LightGBM",
+             "CPU threads", "LightGBM training worker count (-1 means all CPUs)",
+             "integer", 1, -1, 32, 214),
+            ("lightgbm.random_state", "LightGBM",
+             "Random seed", "Deterministic LightGBM seed for reproducibility",
+             "integer", 42, 0, 2147483647, 215),
+            ("lightgbm.early_stopping_rounds", "LightGBM",
+             "Classifier early stopping patience",
+             "Chronological validation patience for binary logloss",
+             "integer", 30, 2, 300, 216),
+            ("lightgbm.calibration_solver", "LightGBM",
+             "Probability calibration solver", "Logistic Platt calibration solver",
+             "string", "lbfgs", None, None, 217),
+        ]
+        for key, category, label, description, kind, default, minimum, maximum, order in new_definitions:
+            constraints = (
+                {"minimum": minimum, "maximum": maximum}
+                if minimum is not None else {"options": ["lbfgs", "liblinear"]}
+            )
+            forecast_defaults.append({
+                "key": key, "category": category, "label": label,
+                "description": description, "value_type": kind,
+                "value": default, "constraints": constraints,
+                "public": True, "requires_restart": False,
+                "display_order": order,
+            })
         for item in forecast_defaults:
             if item["key"] not in existing_keys:
                 session.add(MLRuntimeParameter(
@@ -347,6 +421,13 @@ def synchronize_parameter_catalog() -> None:
                     display_order=item["display_order"],
                     updated_at=now,
                 ))
+            elif item["key"].startswith("forecast.regression_"):
+                # Existing research settings retain their values, but display
+                # correct semantics for the new model family.
+                stored = session.get(MLRuntimeParameter, item["key"])
+                stored.label = item["label"]
+                stored.description = item["description"]
+                stored.updated_at = now
         for seed in seed_rows:
             if seed["key"] in existing_keys:
                 if seed["key"] == "api.cors_origins":
@@ -376,6 +457,14 @@ def synchronize_parameter_catalog() -> None:
                     updated_at=now,
                 )
             )
+        for seed in seed_rows:
+            if seed["key"].startswith("xgboost."):
+                legacy = session.get(MLRuntimeParameter, seed["key"])
+                if legacy is not None:
+                    # Historical snapshots stay readable. Hide obsolete
+                    # editable controls so only LightGBM is tuned from UI.
+                    legacy.public = False
+                    legacy.updated_at = now
 
 
 def get_runtime_parameters() -> RuntimeParameters:
@@ -553,6 +642,14 @@ def _validate_cross_parameter_values(values: dict[str, Any]) -> None:
     patience = int(values.get("forecast.regression_early_stopping_rounds", 30))
     if patience >= regression_trees:
         raise ParameterValidationError("Regressor early stopping must be shorter than max trees")
+    if int(values["lightgbm.early_stopping_rounds"]) >= int(values["lightgbm.n_estimators"]):
+        raise ParameterValidationError("LightGBM classifier patience must be less than maximum trees")
+    for prefix in ("lightgbm", "forecast.regression"):
+        if int(values[f"{prefix}.num_leaves"]) > 2 ** int(values[f"{prefix}.max_depth"]):
+            raise ParameterValidationError(f"{prefix}.num_leaves exceeds binary depth capacity")
+    if (float(values["lightgbm.subsample"]) < 1.0
+            and int(values["lightgbm.subsample_freq"]) == 0):
+        raise ParameterValidationError("LightGBM subsample_freq must be positive when sampling rows")
 
     if values.get("backtest.default_history_source", "MEXC") not in {
         "MEXC", "BINANCE_SPOT_ARCHIVE",
