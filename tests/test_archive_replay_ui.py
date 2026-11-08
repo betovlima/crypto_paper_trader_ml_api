@@ -144,6 +144,7 @@ def test_ui_replay_creates_db_job_from_original_snapshot_and_persists_comparison
             result_json=json.dumps({"experiment_type": "BTC_DIRECTION_RETURN"}),
             created_at=datetime.now(timezone.utc),
         ))
+        session.flush()  # Persist parent first; SQLAlchemy has no mapped relationship.
         session.add(MLBacktestAudit(job_id=original_id, archive_zip=old_archive))
 
     new_id = None
