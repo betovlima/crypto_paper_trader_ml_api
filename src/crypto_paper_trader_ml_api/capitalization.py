@@ -98,6 +98,7 @@ def _summary_series(
     candles: list[dict], signals: dict, *, start: int, end: int,
     capital: float, fee: float, slippage: float, edge: float,
     min_probability: float, exit_return: float, baseline: bool, label: str,
+    bar_seconds: int,
 ) -> dict:
     cash, quantity = capital, 0.0
     actions, points = [], []
@@ -151,7 +152,7 @@ def _summary_series(
         peak = max(peak, equity)
         max_drawdown = min(max_drawdown, equity / peak - 1)
         points.append({
-            "timestamp": (candle["timestamp"] + timedelta(seconds=1)).isoformat(),
+            "timestamp": (candle["timestamp"] + timedelta(seconds=bar_seconds)).isoformat(),
             "equity": equity, "position": "BTC" if quantity > 0 else "CASH",
         })
 
@@ -159,7 +160,7 @@ def _summary_series(
     if quantity > 0:
         candle = candles[end]
         trade("SELL", candle["close"],
-              candle["timestamp"] + timedelta(seconds=1),
+              candle["timestamp"] + timedelta(seconds=bar_seconds),
               None, "END_OF_TEST")
         points[-1]["equity"] = cash
         points[-1]["position"] = "CASH"
@@ -171,7 +172,7 @@ def _summary_series(
         1 / 48,
     )
     rate = cash / capital - 1
-    cagr = (cash / capital) ** (365.25 / duration_days) - 1
+    cagr = (cash / capital) ** (365.25 / duration_days) - 1 if duration_days >= 30 else None
     stride = max(1, math.ceil(len(points) / 500))
     sampled = [p for i, p in enumerate(points) if i % stride == 0 or i == len(points) - 1]
     return {
@@ -220,6 +221,7 @@ def compare_capitalization(
     if start == end:
         raise ValueError("Período OOS insuficiente para calcular capitalização")
     common = dict(start=start, end=end, capital=initial_capital, fee=fee_rate,
+                  bar_seconds=seconds,
                   slippage=slippage_rate, edge=entry_edge,
                   min_probability=min_probability, exit_return=exit_return)
     results = [
