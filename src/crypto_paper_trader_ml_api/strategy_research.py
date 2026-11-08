@@ -169,6 +169,18 @@ def _next_candidate(
     Adapted from the MCT's unified exploration/refinement idea. It uses
     scikit-learn GPs, not the MCT's BoTorch four-outcome CARO engine.
     """
+    if index == 0:
+        # Fixed permissive research anchor, defined BEFORE seeing OOS data.
+        # This separates genuinely untradable forecasts from sparse sampling
+        # across a 20-dimensional hyperparameter search.
+        seed = np.full(len(SPACE), 0.5, dtype=float)
+        keys = [entry[0] for entry in SPACE]
+        for name in (
+            "policy.entry_probability", "policy.entry_edge",
+            "policy.min_positive_votes",
+        ):
+            seed[keys.index(name)] = 0.0
+        return seed
     if mode != "BAYESIAN" or len(points) < 8 or not observations:
         return sampler.random(1)[0]
     valid = [
