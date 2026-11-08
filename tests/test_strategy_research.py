@@ -155,6 +155,28 @@ def test_all_cash_campaign_reports_no_trades_and_does_not_select_a_champion(monk
 
 
 
+def test_legacy_cash_only_optimized_strategy_cannot_execute_oos(monkeypatch):
+    source = _insert_source()
+    _give_source_three_horizons(source)
+    try:
+        campaign = strategy_research.create_strategy(
+            name="Campanha antiga sem operações", source_job_id=source
+        )
+        with SessionLocal.begin() as session:
+            row = session.get(MLResearchStrategy, campaign["id"])
+            row.status = "OPTIMIZED"
+            row.champion_json = json.dumps({
+                "parameters": {"lightgbm.learning_rate": .04},
+                "metrics": {"completed_cycles": 0, "capital_final": 10000.0},
+            })
+        with pytest.raises(ValueError, match="sem compras BTC/CASH"):
+            strategy_research.execute_strategy(campaign["id"])
+        assert strategy_research.get_strategy(campaign["id"])["execution_job_id"] is None
+    finally:
+        _cleanup(source)
+
+
+
 def test_new_strategy_uses_all_horizons_and_rejects_incomplete_archive():
     source = _insert_source()
     try:
