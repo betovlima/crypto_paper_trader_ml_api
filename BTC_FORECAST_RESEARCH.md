@@ -73,3 +73,31 @@ Para cada rodada, registrar ao menos:
 
 A tabela deve ser preenchida com resultados reais, não com números demonstrativos.
 Não alterar backtests históricos após a execução.
+
+## Exportação de auditoria (incluída na etapa 1)
+
+Novos backtests completos gravam um ZIP por execução na tabela
+`ml_backtest_audits`. A URL `GET /v1/ml-backtests/{job_id}/audit.zip`
+devolve os bytes sem recalcular os modelos ou reconstruir previsões antigas.
+
+Arquivos do ZIP:
+- `manifest.json`: versão, universo, janela temporal, contagem de candles, ordens
+  e operação, regras da amostra, referências de topo e semântica de timestamps.
+- `predictions_oos.csv`: **todos** os candles OOS com dados, indicadores, rótulos
+  realizados e probabilidades registradas no treinamento walk-forward.
+- `positions_full.csv`: posição efetiva BTC/CASH e patrimônio por candle,
+  maiores fechamentos observados até cada ponto e drawdown do patrimônio.
+- `executions_full.csv`: compras/vendas simuladas, inclusive duas no mesmo
+  candle, preços, motivos, distância ao topo conhecida na execução.
+- `trades_full.csv`: operações concluídas (sem truncamento de interface).
+- `request.json`, `parameters_snapshot.json`, `model_metadata.json` e
+  `report.json`: configuração, parâmetros, métricas e informações de folds.
+
+As execuções anteriores a esta versão não possuem esses dados brutos
+persistidos: **não** são reconstruídas retroativamente a partir dos gráficos,
+nem são apresentadas como exportações completas. É preciso executar um novo
+backtest usando a ML API atualizada. A nova aba BTC Forecast habilita o
+botão Exportar auditoria ZIP quando `audit_available=true`.
+
+O ZIP foi planejado para ser anexado à análise de cada rodada experimental.
+Não contém execução de ordens reais.
