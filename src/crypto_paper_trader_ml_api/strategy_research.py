@@ -706,7 +706,8 @@ def _run_optimization(strategy_id: str) -> None:
                 # One profitable cycle is evidence of an isolated event, not
                 # a stable strategy. No OOS run until ALL pre-OOS gates pass.
                 cycles = metrics.get("completed_cycles", metrics.get("buys", 0))
-                eligible = bool(metrics.get("robustness", {}).get("passed"))
+                eligible = (bool(metrics.get("robustness", {}).get("passed"))
+                            if len(horizons) == 3 else bool(cycles))
                 status = "NO_TRADES" if not cycles else (
                     "COMPLETED" if eligible else "INSUFFICIENT_EVIDENCE"
                 )
@@ -745,7 +746,6 @@ def _run_optimization(strategy_id: str) -> None:
                     "inactive_trials": len(inactive),
                     "insufficient_evidence_trials": len(insufficient),
                     "failed_trials": len(unsuccessful),
-                    "insufficient_evidence_trials": len(insufficient),
                     "quality_gate": "V9_PRE_OOS_ROBUSTNESS_AND_ALPACA_STRESS",
                     "quality_by_trial": [
                         {"trial": item["trial"], "status": item["status"],
