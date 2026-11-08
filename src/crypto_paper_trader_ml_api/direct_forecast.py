@@ -442,7 +442,7 @@ def run_direction_backtest(
                         "metrics": _metrics(group),
                         "model_diagnostics": next(
                             (
-                                window["model_diagnostics"]
+                                window.get("model_diagnostics")
                                 for window in details["fold_windows"]
                                 if int(window["fold"]) == int(f)
                             ), None,

@@ -210,6 +210,7 @@ def test_full_direction_job_routes_to_research_engine_and_writes_audit(monkeypat
     def fake_predict(featured, parameters, *, timeframe, horizon_hours, cancelled, progress=None):
         frame = create_direction_labels(featured, timeframe, horizon_hours)
         frame = frame.dropna(subset=["forecast_realized_return"]).head(30).copy()
+        frame["forecast_raw_p_up"] = 0.52
         frame["forecast_p_up"] = 0.51
         frame["forecast_predicted_return"] = 0.001
         frame["forecast_baseline_p_up"] = 0.5
