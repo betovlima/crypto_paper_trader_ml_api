@@ -2,6 +2,52 @@
 
 Independent API for long-period LightGBM walk-forward backtests. It is separate from the paper-trading API and never sends real orders.
 
+## BTC/CASH V5: compound capital and causal rotation research
+
+The **Laboratório ML** page is the only user-facing workflow. LightGBM
+provides forecast probabilities and returns for 2h, 6h and 24h; the research
+objective is now **one fully reinvested BTC/CASH portfolio**, not accuracy, AUC,
+or the average of three independent simulated accounts.
+
+Creating a strategy selects an audited historical run. Either **Otimizar
+rotações BTC/CASH** (8 Latin Hypercube candidates) or **CARO · Otimizar
+capitalização** (24 adaptive GP candidates) searches model hyperparameters
+**and decision-policy parameters**:
+
+- minimum upside probability and net predicted return required to enter;
+- weaker forecast conditions to exit (probability hysteresis);
+- minimum number of favorable horizons; forecast-horizon weights;
+- close-confirmed stop loss, trailing stop and take-profit thresholds;
+- minimum holding candles and cooldown candles before re-entry.
+
+Every simulated buy reinvests the full current cash balance. Every sale
+returns the net BTC value to CASH. Historical fees and slippage are applied
+to both sides; no order is ever sent to an exchange or broker.
+
+Training, early stopping, probability calibration and economic selection
+happen strictly before the first immutable OOS fold. Signals are derived
+from the previous candle CLOSE, with orders only at the next candle OPEN.
+Stops are close-confirmed and also operate if a new forecast is missing;
+we never claim an intrabar fill at an unobserved stop price.
+
+The selected model and decision-policy snapshot are stored with the new
+backtest job. The final OOS capitalization uses the identical policy engine
+with **no re-optimization on OOS data**. For optimized strategy jobs the
+Front automatically displays the BTC/CASH equity curve, executed actions,
+drawdown and Buy & Hold benchmark, without a model-versus-model comparison.
+
+**Audit ZIP:** choose Exportar relatório e auditoria ZIP on the selected
+strategy after its final run completes. The package contains:
+`strategy.json`, `optimization_trials.csv`, `source_historical_audit.zip`,
+`final_execution_parameters.json`, `final_execution_result.json`,
+`final_oos_audit.zip` and `final_oos_capitalization.json`.
+The last file includes the **complete** chronological equity timeline,
+all simulated transactions and fees, the chosen risk policy and OOS returns.
+
+A successful pre-OOS selection does **not** establish live profitability.
+The V5 search space is exploratory and does not yet import the 52 engineered
+features from the MCT. Historical snapshots remain immutable.
+
 ## LightGBM replacement (V3 research)
 
 The classification and regression learners now use LightGBM 4.6.x, including
