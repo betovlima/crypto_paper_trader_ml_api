@@ -7,7 +7,7 @@ from zipfile import ZipFile
 import numpy as np
 
 from crypto_paper_trader_ml_api.archive_replay import inspect_source_archive
-from crypto_paper_trader_ml_api.strategy_research import _candidate, _prepare, _score
+from crypto_paper_trader_ml_api.strategy_research import SPACE, _candidate, _prepare, _score
 from crypto_paper_trader_ml_api.settings_service import (
     RuntimeParameters, get_runtime_parameters, get_runtime_parameters_from_snapshot,
 )
@@ -54,7 +54,7 @@ def test_tuning_trains_on_history_strictly_before_first_oos():
     assert train["forecast_future_at_utc"].max() < early["timestamp"].min()
     assert early["forecast_future_at_utc"].max() < calibration["timestamp"].min()
     assert calibration["forecast_future_at_utc"].max() < scoring["timestamp"].min()
-    candidate = _candidate(np.full(7, .5))
+    candidate = _candidate(np.full(len(SPACE), .5))
     metrics = _score(dataset, candidate, parameters)
     assert np.isfinite(metrics["score"])
     assert np.isfinite(metrics["capital_final"])
