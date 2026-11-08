@@ -12,7 +12,9 @@ from crypto_paper_trader_ml_api.settings_service import (
 def test_runtime_parameters_are_loaded_from_database() -> None:
     parameters = get_runtime_parameters()
     assert parameters.string("backtest.default_symbol")
-    assert parameters.integer("xgboost.n_estimators") > 0
+    assert parameters.integer("lightgbm.n_estimators") > 0
+    assert parameters.integer("lightgbm.num_leaves") >= 2
+    assert parameters.integer("forecast.regression_num_leaves") >= 2
 
 
 def test_cross_parameter_validation_rejects_invalid_thresholds() -> None:
