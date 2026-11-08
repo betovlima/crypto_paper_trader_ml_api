@@ -401,6 +401,14 @@ class BinancePublicArchiveClient:
             symbol=symbol, timeframe=timeframe,
             missing=missing, unexpected=unexpected,
         )
+        # Do not waive a gap when the daily file could not be checked.
+        # The official event alone is not evidence that THIS downloaded
+        # dataset was complete outside the suspension.
+        if allowed_halts and not any(
+            attempt.startswith("2023-03-24: 0 missing candles found in verified daily archive")
+            for attempt in repair_attempts
+        ):
+            allowed_halts = []
         self.market_interruptions[timeframe] = allowed_halts
         if (
             (len(missing) or len(unexpected) or len(frame) != required_with_warmup)
