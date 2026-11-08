@@ -609,6 +609,7 @@ def calculate_results(
             "label_horizon_candles": model_metadata.get("label_horizon_candles"),
             "history_coverage": model_metadata.get("history_coverage"),
             "history_source": request.history_source,
+            "market_interruptions": model_metadata.get("market_interruptions", {}),
             "label_vs_execution": model_metadata.get("target_vs_simulation"),
         },
         "models": {
@@ -718,6 +719,23 @@ def run_ml_backtest(
         observed_coverage = min(1.0, available_intervals / max(1, requested_candles))
         metadata["history_source"] = request.history_source
         metadata["source_archives"] = getattr(client, "archive_manifest", None)
+        metadata["market_interruptions"] = getattr(client, "market_interruptions", {})
+        documented_halt_candles = sum(
+            int(event["missing_candles"])
+            for events in metadata["market_interruptions"].values()
+            for event in events
+            if request.decision_timeframe in metadata["market_interruptions"]
+            and events is metadata["market_interruptions"][request.decision_timeframe]
+        )
+        coverage_status = (
+            "FULL"
+            if observed_coverage >= 0.99 and missing_intervals == 0
+            else "FULL_WITH_DOCUMENTED_HALT"
+            if observed_coverage >= 0.99
+            and documented_halt_candles > 0
+            and missing_intervals == documented_halt_candles
+            else "PARTIAL"
+        )
         metadata["history_coverage"] = {
             "source": request.history_source,
             "requested_years": request.period_years,
@@ -728,9 +746,11 @@ def run_ml_backtest(
             "raw_end": raw_end.isoformat(),
             "raw_available_intervals": available_intervals,
             "missing_intervals": missing_intervals,
+            "documented_market_halt_candles": documented_halt_candles,
+            "market_interruptions": metadata["market_interruptions"],
             "max_observed_interval_gap": float(interval_counts.max()) if len(interval_counts) else 0.0,
             "requested_period_coverage_ratio": round(observed_coverage, 6),
-            "coverage_status": "FULL" if observed_coverage >= 0.99 and missing_intervals == 0 else "PARTIAL",
+            "coverage_status": coverage_status,
             "oos_candles": len(predicted),
             "oos_start": pd.Timestamp(predicted.iloc[0]["timestamp"]).isoformat(),
             "oos_end": pd.Timestamp(predicted.iloc[-1]["timestamp"]).isoformat(),

@@ -96,6 +96,7 @@ def build_audit_archive(
         "symbol": request.symbol,
         "market_history_source": request.history_source,
         "market_archive_checksums": model_metadata.get("source_archives"),
+        "market_interruptions": model_metadata.get("market_interruptions", {}),
         "decision_timeframe": request.decision_timeframe,
         "trend_timeframe": request.trend_timeframe,
         "candles": len(complete_trace),
@@ -141,6 +142,9 @@ def build_audit_archive(
             )
         archive.writestr("folds.json", _json_bytes(model_metadata.get("fold_windows", [])))
         archive.writestr("history_coverage.json", _json_bytes(model_metadata.get("history_coverage")))
+        archive.writestr("market_interruptions.json", _json_bytes(
+            model_metadata.get("market_interruptions", {})
+        ))
 
         archive.writestr("positions_full.csv", _csv_bytes(position_rows, [
             "timestamp_utc", "btc_close", "peak_close_so_far",
