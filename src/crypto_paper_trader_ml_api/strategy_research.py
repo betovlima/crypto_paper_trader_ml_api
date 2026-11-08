@@ -44,10 +44,10 @@ SPACE = (
     ("forecast.regression_num_leaves", "int", 5, 15),
     ("forecast.regression_learning_rate", "float", 0.015, 0.12),
 )
-MAX_DEV_CANDLES = 16000
+MAX_DEV_CANDLES = 48000
 POLICY_SPACE = (
-    ("policy.entry_probability", "float", 0.50, 0.64),
-    ("policy.exit_probability", "float", 0.25, 0.49),
+    ("policy.entry_probability", "float", 0.30, 0.60),
+    ("policy.exit_probability", "float", 0.12, 0.45),
     ("policy.entry_edge", "float", 0.0, 0.002),
     ("policy.exit_return", "float", -0.018, 0.004),
     ("policy.min_positive_votes", "int", 1, 3),
@@ -301,9 +301,11 @@ def _prepare(
     n = len(usable)
     # Purged internal research partitions: training / early stop /
     # calibration / scoring. Scoring samples are never training samples.
-    start_early = int(n * .60)
-    start_cal = int(n * .77)
-    start_score = int(n * .87)
+    # A longer independent PRE-OOS economic selection window across
+    # market regimes, with purges between fitting and selection.
+    start_early = int(n * .52)
+    start_cal = int(n * .65)
+    start_score = int(n * .75)
     train = usable.iloc[:start_early - h].copy()
     early = usable.iloc[start_early:start_cal - h].copy()
     calibration = usable.iloc[start_cal:start_score - h].copy()
@@ -423,6 +425,15 @@ def _score(
     return {
         "score": float(score),
         "brier": brier, "mae": mae, **capital,
+        "__calibration": {
+            "method": calibrator.method,
+            "selection_brier": calibrator.selection_brier,
+            "selection_rows": calibrator.selection_rows,
+            "calibration_rows": calibrator.calibration_rows,
+            "calibration_up_rate": float(calibration["forecast_realized_up"].mean()),
+            "scoring_mean_p_up": float(np.mean(probs)),
+            "scoring_max_p_up": float(np.max(probs)),
+        },
         "__policy_predictions": predictions,
     }
 
@@ -543,6 +554,7 @@ def _combine_horizon_metrics(
                 "brier": results[str(h)]["brier"],
                 "mae": results[str(h)]["mae"],
                 "signal_count": len(signals_by_horizon[h]),
+                "calibration": results[str(h)].get("__calibration"),
             } for h in JOINT_HORIZONS
         },
         "capital_note": "Um patrimônio BTC/CASH reinvestido; custos incluídos",
@@ -609,6 +621,8 @@ def _run_optimization(strategy_id: str) -> None:
                 "early_stopping_rows": len(data[1]),
                 "calibration_rows": len(data[2]),
                 "selection_rows": len(data[3]),
+            "selection_start": pd.Timestamp(data[3]["timestamp"].iloc[0]).isoformat(),
+            "selection_end": pd.Timestamp(data[3]["timestamp"].iloc[-1]).isoformat(),
             }
             for h, data in datasets.items()
         }
@@ -723,6 +737,8 @@ def _run_optimization(strategy_id: str) -> None:
             "horizons_hours": list(horizons),
             "training_rows_by_horizon": training_counts,
             "aggregation_method": "Single compounded BTC/CASH portfolio; final capital with risk and temporal stability",
+            "selection_segments": 3,
+            "selection_window_rule": "last 25 percent of pre-OOS candles; up to 48000 archived candles; purged boundaries",
             "optimization_target": "NET_COMPOUNDED_BTC_CASH_CAPITAL",
             "optimization_dimensions": len(SPACE),
             "learner_dimensions": len(SPACE) - len(POLICY_SPACE),
