@@ -75,7 +75,9 @@ class MLBacktestJobDetail(MLBacktestJobResponse):
 
 
 class BTCCapitalizationRequest(BaseModel):
-    horizon_hours: Literal[2, 6, 24] = 2
+    # 0 means a single strategy campaign jointly optimizing all three forecast horizons.
+    # 2/6/24 remain accepted for older clients and saved strategies.
+    horizon_hours: Literal[0, 2, 6, 24] = 0
     initial_capital: float = Field(default=10000.0, gt=0, le=1000000000)
     fee_rate: float = Field(default=0.001, ge=0, le=0.05)
     slippage_rate: float = Field(default=0.0005, ge=0, le=0.05)
