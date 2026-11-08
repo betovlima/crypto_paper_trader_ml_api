@@ -45,6 +45,7 @@ SPACE = (
 )
 MAX_DEV_CANDLES = 16000
 MAX_TRIALS = 40
+JOINT_HORIZONS = (2, 6, 24)
 
 
 def _now() -> datetime:
@@ -54,7 +55,9 @@ def _now() -> datetime:
 def _decode(row: MLResearchStrategy) -> dict:
     return {
         "id": row.id, "name": row.name, "source_job_id": row.source_job_id,
-        "horizon_hours": row.horizon_hours, "status": row.status, "mode": row.mode,
+        "horizon_hours": row.horizon_hours,
+        "horizons_hours": list(JOINT_HORIZONS if row.horizon_hours == 0 else (row.horizon_hours,)),
+        "status": row.status, "mode": row.mode,
         "progress": row.progress, "trials_target": row.trials_target,
         "trials": json.loads(row.trials_json or "[]"),
         "champion": json.loads(row.champion_json) if row.champion_json else None,
@@ -82,7 +85,7 @@ def get_strategy(strategy_id: str) -> dict:
         return _decode(row)
 
 
-def create_strategy(*, name: str, source_job_id: str, horizon_hours: int) -> dict:
+def create_strategy(*, name: str, source_job_id: str, horizon_hours: int = 0) -> dict:
     with SessionLocal.begin() as session:
         job = session.get(MLBacktestJob, source_job_id)
         if job is None or job.status != "COMPLETED":
@@ -91,8 +94,14 @@ def create_strategy(*, name: str, source_job_id: str, horizon_hours: int) -> dic
         if audit is None:
             raise ValueError("A execução selecionada não possui auditoria armazenada na ML API")
         source_request, source_settings = inspect_source_archive(audit.archive_zip)
-        if horizon_hours not in [int(x) for x in source_settings["forecast.horizons_hours"]]:
-            raise ValueError("Horizonte não está disponível no histórico selecionado")
+        available = {int(x) for x in source_settings["forecast.horizons_hours"]}
+        selected = JOINT_HORIZONS if horizon_hours == 0 else (horizon_hours,)
+        missing = set(selected) - available
+        if missing:
+            raise ValueError(
+                f"A auditoria selecionada não contém os horizontes {sorted(missing)}h; "
+                "escolha uma execução com previsões de 2h, 6h e 24h."
+            )
         row = MLResearchStrategy(
             id=str(uuid4()), name=name.strip(), source_job_id=source_job_id,
             horizon_hours=horizon_hours, status="DRAFT", progress=0, trials_json="[]",
@@ -201,7 +210,10 @@ def _next_candidate(
         return sampler.random(1)[0]
 
 
-def _prepare(source_archive: bytes, horizon: int, parameters: RuntimeParameters):
+def _prepare(
+    source_archive: bytes, horizon: int, parameters: RuntimeParameters,
+    oos_cutoff: pd.Timestamp | None = None,
+):
     """Freeze training strictly before the FIRST archived OOS test date."""
     request, _ = inspect_source_archive(source_archive)
     with ZipFile(BytesIO(source_archive)) as archive:
@@ -210,6 +222,8 @@ def _prepare(source_archive: bytes, horizon: int, parameters: RuntimeParameters)
         pd.Timestamp(fold["test_start"])
         for fold in windows if int(fold["horizon_hours"]) == horizon
     )
+    if oos_cutoff is not None:
+        first_oos = min(first_oos, oos_cutoff)
     client = ArchivedMarketClient(source_archive, request)
     decision = client.fetch_history(
         symbol=request.symbol, timeframe=request.decision_timeframe,
@@ -361,6 +375,35 @@ def _score(
     }
 
 
+def _combine_horizon_metrics(results: dict[str, dict]) -> dict:
+    """One common model candidate across 2h/6h/24h, not three campaigns.
+
+    Individual horizon capital paths are independent; their mean is only a
+    descriptive metric, never a fabricated blended BTC/CASH portfolio.
+    """
+    values = list(results.values())
+    if not values:
+        raise ValueError("Nenhuma previsão disponível para otimização")
+    if len(values) == 1:
+        return {**values[0], "per_horizon": results, "score_method": "single"}
+    scores = np.asarray([v["score"] for v in values], dtype=float)
+    return {
+        "score": float(0.70 * np.mean(scores) + 0.30 * np.min(scores)),
+        "score_method": "0.70_mean_0.30_worst",
+        "capital_final": float(np.mean([v["capital_final"] for v in values])),
+        "capital_final_worst": float(min(v["capital_final"] for v in values)),
+        "capital_note": "Média de simulações independentes, não carteira multi-horizonte consolidada",
+        "return_total": float(np.mean([v["return_total"] for v in values])),
+        "max_drawdown": float(min(v["max_drawdown"] for v in values)),
+        "worst_fold_return": float(min(v["worst_fold_return"] for v in values)),
+        "sharpe": float(min(v["sharpe"] for v in values)),
+        "brier": float(np.mean([v["brier"] for v in values])),
+        "mae": float(np.mean([v["mae"] for v in values])),
+        "per_horizon": results,
+    }
+
+
+
 def _update_strategy(strategy_id: str, **fields) -> None:
     with SessionLocal.begin() as session:
         row = session.get(MLResearchStrategy, strategy_id)
@@ -391,8 +434,26 @@ def _run_optimization(strategy_id: str) -> None:
         values.update({k: v for k, v in current.items() if k.startswith("lightgbm.")
                        or k.startswith("forecast.regression_")})
         base = RuntimeParameters(values)
-        dataset = _prepare(archive, horizon, base)
-        train, early, calibration, scoring, _, _, first_oos = dataset
+        horizons = JOINT_HORIZONS if horizon == 0 else (horizon,)
+        with ZipFile(BytesIO(archive)) as z:
+            fold_windows = json.loads(z.read("folds.json"))
+        boundaries = [
+            pd.Timestamp(fold["test_start"]) for fold in fold_windows
+            if int(fold["horizon_hours"]) in horizons
+        ]
+        if set(horizons) - {int(fold["horizon_hours"]) for fold in fold_windows}:
+            raise ValueError("Faltam folds OOS de algum horizonte na auditoria histórica")
+        first_oos = min(boundaries)
+        datasets = {h: _prepare(archive, h, base, first_oos) for h in horizons}
+        training_counts = {
+            str(h): {
+                "training_rows": len(data[0]),
+                "early_stopping_rows": len(data[1]),
+                "calibration_rows": len(data[2]),
+                "selection_rows": len(data[3]),
+            }
+            for h, data in datasets.items()
+        }
         sampler = qmc.LatinHypercube(d=len(SPACE), seed=42)
         rng = np.random.default_rng(42)
         points: list[np.ndarray] = []
@@ -409,7 +470,10 @@ def _run_optimization(strategy_id: str) -> None:
             vector = _next_candidate(index, mode, points, scores, sampler, rng, records)
             candidate = _candidate(vector)
             try:
-                metrics = _score(dataset, candidate, base)
+                per_horizon = {
+                    str(h): _score(datasets[h], candidate, base) for h in horizons
+                }
+                metrics = _combine_horizon_metrics(per_horizon)
                 score = metrics["score"]
                 entry = {"trial": index + 1, "status": "COMPLETED",
                          "parameters": candidate, "metrics": metrics}
@@ -447,10 +511,9 @@ def _run_optimization(strategy_id: str) -> None:
         summary = {
             "validation_kind": "INTERNAL_PRE_OOS_CHRONOLOGICAL",
             "oos_untouched_from": first_oos.isoformat(),
-            "training_rows": len(train),
-            "early_stopping_rows": len(early),
-            "calibration_rows": len(calibration),
-            "selection_rows": len(scoring),
+            "horizons_hours": list(horizons),
+            "training_rows_by_horizon": training_counts,
+            "aggregation_method": "0.70 mean economic score + 0.30 worst-horizon score",
             "model_family": "LightGBM",
             "optimization_algorithm": ("CRYPTO_CARO_GP_CONSTRAINED_EI" if mode == "BAYESIAN" else "LATIN_HYPERCUBE"),
             "caro_note": "Crypto adaptation using sklearn GPs, not the MCT BoTorch engine.",
