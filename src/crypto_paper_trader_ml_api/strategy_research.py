@@ -431,6 +431,13 @@ def _entry_diagnostics(joint_signals: dict, cfg: dict, fee: float, slippage: flo
     """Explain the opportunity funnel without using any realized returns."""
     required_cost = (1 + slippage) / ((1 - fee) ** 2 * (1 - slippage)) - 1
     samples = list(joint_signals.values())
+    probabilities = np.asarray([float(row["p_up"]) for row in samples], dtype=float)
+    predicted_returns = np.asarray([float(row["predicted_return"]) for row in samples], dtype=float)
+    eligible = sum(int(
+        row["positive_votes"] >= cfg["policy.min_positive_votes"]
+        and row["p_up"] >= cfg["policy.entry_probability"]
+        and row["predicted_return"] > required_cost + cfg["policy.entry_edge"]
+    ) for row in samples)
     return {
         "total_aligned_signals": len(samples),
         "required_round_trip_return": float(required_cost),
@@ -445,14 +452,18 @@ def _entry_diagnostics(joint_signals: dict, cfg: dict, fee: float, slippage: flo
             int(s["predicted_return"] > required_cost + cfg["policy.entry_edge"])
             for s in samples
         ),
-        "passes_all_entry_filters": sum(int(
-            s["positive_votes"] >= cfg["policy.min_positive_votes"]
-            and s["p_up"] >= cfg["policy.entry_probability"]
-            and s["predicted_return"] > required_cost + cfg["policy.entry_edge"]
-        ) for s in samples),
-        "max_probability": max((float(s["p_up"]) for s in samples), default=None),
-        "max_predicted_return": max(
-            (float(s["predicted_return"]) for s in samples), default=None
+        "passes_all_entry_filters": eligible,
+        "max_probability": float(np.max(probabilities)) if len(samples) else None,
+        "p90_probability": float(np.quantile(probabilities, .90)) if len(samples) else None,
+        "max_predicted_return": float(np.max(predicted_returns)) if len(samples) else None,
+        "p90_predicted_return": float(np.quantile(predicted_returns, .90)) if len(samples) else None,
+        "diagnosis": (
+            "NO_ALIGNED_SIGNALS" if not samples else
+            "RETURN_FILTER_BLOCKED" if not any(
+                s["predicted_return"] > required_cost + cfg["policy.entry_edge"]
+                for s in samples
+            ) else "PROBABILITY_OR_VOTE_BLOCKED" if eligible == 0
+            else "HAS_ENTRY_OPPORTUNITIES"
         ),
     }
 
@@ -535,7 +546,15 @@ def _combine_horizon_metrics(
             } for h in JOINT_HORIZONS
         },
         "capital_note": "Um patrimônio BTC/CASH reinvestido; custos incluídos",
-        "entry_diagnostics": diagnostics,
+        "entry_diagnostics": {
+            **diagnostics,
+            "diagnosis": (
+                "ELIGIBLE_BUT_NOT_EXECUTED"
+                if simulated["completed_cycles"] == 0
+                and diagnostics["passes_all_entry_filters"] > 0
+                else diagnostics["diagnosis"]
+            ),
+        },
         "policy": cfg,
     }
 
@@ -645,7 +664,22 @@ def _run_optimization(strategy_id: str) -> None:
             inactive = [entry for entry in records if entry["status"] == "NO_TRADES"]
             unsuccessful = [entry for entry in records if entry["status"] == "FAILED"]
             if inactive:
-                diagnostic = inactive[0]["metrics"].get("entry_diagnostics", {})
+                diagnostics_by_trial = [
+                    {
+                        "trial": entry["trial"],
+                        "diagnostics": entry["metrics"].get("entry_diagnostics", {}),
+                    }
+                    for entry in inactive
+                ]
+                diagnostic = max(
+                    (entry["diagnostics"] for entry in diagnostics_by_trial),
+                    key=lambda item: (
+                        item.get("passes_all_entry_filters", 0),
+                        item.get("passes_expected_return", 0),
+                        item.get("passes_probability", 0),
+                    ),
+                    default={},
+                )
                 summary = {
                     "validation_kind": "INTERNAL_PRE_OOS_CHRONOLOGICAL",
                     "oos_untouched_from": first_oos.isoformat(),
@@ -655,6 +689,8 @@ def _run_optimization(strategy_id: str) -> None:
                     "inactive_trials": len(inactive),
                     "failed_trials": len(unsuccessful),
                     "diagnostic_example": diagnostic,
+                    "diagnostics_by_trial": diagnostics_by_trial,
+                    "reason_code": diagnostic.get("diagnosis", "UNKNOWN"),
                     "selection_warning": "Sem compras na validação; não há candidato econômico vencedor.",
                 }
                 _update_strategy(
