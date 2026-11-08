@@ -28,6 +28,7 @@ def build_rotation_timeline(rows: list[dict], maximum_points: int) -> list[dict]
         close = float(row["btc_close"])
         if not math.isfinite(close) or close <= 0:
             raise ValueError("BTC close must be positive and finite")
+        previous_peak = high_water_close if high_water_close > 0 else None
         high_water_close = max(high_water_close, close)
         if index % stride and index not in important:
             continue
@@ -40,7 +41,19 @@ def build_rotation_timeline(rows: list[dict], maximum_points: int) -> list[dict]
                 "position": row["position"],
                 "equity": float(row["equity"]),
                 "buy_hold": float(row["buy_hold"]),
-                "actions": list(row.get("actions", [])),
+                "actions": [
+                    {
+                        **action,
+                        "distance_to_previous_peak": (
+                            float(action["execution_price"])
+                            / (high_water_close if action.get("reason") == "END_OF_TEST" else previous_peak)
+                            - 1.0
+                        )
+                        if (high_water_close if action.get("reason") == "END_OF_TEST" else previous_peak)
+                        else None,
+                    }
+                    for action in row.get("actions", [])
+                ],
             }
         )
     return timeline
