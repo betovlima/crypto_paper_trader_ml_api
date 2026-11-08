@@ -743,6 +743,8 @@ def run_ml_backtest(
                 parameters=parameters,
                 result=result,
                 model_metadata=metadata,
+                decision_history=decision,
+                trend_history=trend,
             ))
         progress(100, "Completed")
         return result

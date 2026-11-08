@@ -98,12 +98,14 @@ def test_full_audit_preserves_every_prediction_candle_and_execution():
             "manifest.json", "request.json", "parameters_snapshot.json",
             "model_metadata.json", "report.json", "predictions_oos.csv",
             "positions_full.csv", "executions_full.csv", "trades_full.csv",
-            "README.txt",
+            "README.txt", "folds.json", "history_coverage.json",
         } == names
         manifest = json.loads(z.read("manifest.json"))
         assert manifest["scope"] == "OUT_OF_SAMPLE"
         assert manifest["unsampled"] is True
         assert manifest["candles"] == 5
+        assert manifest["schema_version"] == 2
+        assert manifest["raw_history_included"] is False
         prediction_rows = _rows(z, "predictions_oos.csv")
         position_rows = _rows(z, "positions_full.csv")
         action_rows = _rows(z, "executions_full.csv")
@@ -277,3 +279,28 @@ def test_worker_rejects_completed_status_if_audit_is_missing(monkeypatch):
             assert "No complete audit archive" in job.error_message
     finally:
         _delete_job(job_id)
+
+
+def test_audit_can_include_complete_training_history_and_fold_coverage():
+    frame = _frame()
+    parameters = _parameters()
+    simulation = simulate_portfolio(frame, _request(), parameters)
+    history = pd.concat([frame.iloc[:2], frame], ignore_index=True)
+    metadata = {
+        "fold_count": 1, "feature_importance": [],
+        "label_horizon_candles": 12,
+        "fold_windows": [{"fold": 1, "purge_candles_at_each_boundary": 12}],
+        "history_coverage": {"raw_candles": 7, "coverage_status": "PARTIAL"},
+    }
+    content = build_audit_archive(
+        predictions=frame, simulation=simulation, request=_request(),
+        parameters=parameters, result={"summary": {}},
+        model_metadata=metadata, decision_history=history, trend_history=history,
+    )
+    with ZipFile(BytesIO(content)) as z:
+        manifest = json.loads(z.read("manifest.json"))
+        assert manifest["raw_history_included"] is True
+        assert len(_rows(z, "market_history_decision.csv")) == 7
+        assert len(_rows(z, "market_history_trend.csv")) == 7
+        assert json.loads(z.read("folds.json"))[0]["purge_candles_at_each_boundary"] == 12
+        assert json.loads(z.read("history_coverage.json"))["coverage_status"] == "PARTIAL"
