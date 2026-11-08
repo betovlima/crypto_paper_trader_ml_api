@@ -22,6 +22,9 @@ from .binance_archive import BinancePublicArchiveClient
 from .direct_audit import build_direction_audit_archive
 from .engine import ProbabilityCalibrator, _fit_model
 from .features import build_features, feature_names
+from .forecast_diagnostics import (
+    calibration_diagnostics, temporal_block_confidence_intervals, tree_diagnostics,
+)
 from .mexc import MEXCHistoryClient, TIMEFRAME_SECONDS
 from .schemas import ResolvedMLBacktestCreate
 from .settings_service import RuntimeParameters
@@ -63,33 +66,39 @@ def _regressor(
     training: pd.DataFrame, validation: pd.DataFrame,
     columns: list[str], parameters: RuntimeParameters,
 ) -> XGBRegressor | None:
-    outcomes = training["forecast_realized_return"].to_numpy(float)
-    if np.ptp(outcomes) < 1e-12:
+    """Fit in scaled target units; probabilities and reported returns stay unscaled."""
+    scale = parameters.floating("forecast.regression_target_scale")
+    outcomes = training["forecast_realized_return"].to_numpy(float) * scale
+    if np.ptp(outcomes) < 1e-8:
         return None
     model = XGBRegressor(
         objective="reg:squarederror",
         eval_metric="rmse",
         tree_method=parameters.string("xgboost.tree_method"),
-        n_estimators=parameters.integer("xgboost.n_estimators"),
-        max_depth=parameters.integer("xgboost.max_depth"),
-        learning_rate=parameters.floating("xgboost.learning_rate"),
-        min_child_weight=parameters.floating("xgboost.min_child_weight"),
+        n_estimators=parameters.integer("forecast.regression_n_estimators"),
+        max_depth=parameters.integer("forecast.regression_max_depth"),
+        learning_rate=parameters.floating("forecast.regression_learning_rate"),
+        min_child_weight=parameters.floating("forecast.regression_min_child_weight"),
         subsample=parameters.floating("xgboost.subsample"),
         colsample_bytree=parameters.floating("xgboost.colsample_bytree"),
-        gamma=parameters.floating("xgboost.gamma"),
-        reg_alpha=parameters.floating("xgboost.reg_alpha"),
-        reg_lambda=parameters.floating("xgboost.reg_lambda"),
+        gamma=parameters.floating("forecast.regression_gamma"),
+        reg_alpha=parameters.floating("forecast.regression_reg_alpha"),
+        reg_lambda=parameters.floating("forecast.regression_reg_lambda"),
         random_state=parameters.integer("xgboost.random_state"),
         n_jobs=parameters.integer("xgboost.n_jobs"),
-        early_stopping_rounds=parameters.integer("xgboost.early_stopping_rounds"),
+        early_stopping_rounds=parameters.integer(
+            "forecast.regression_early_stopping_rounds"
+        ),
     )
     model.fit(
         training[columns], outcomes,
-        eval_set=[(validation[columns], validation["forecast_realized_return"].to_numpy(float))],
+        eval_set=[(
+            validation[columns],
+            validation["forecast_realized_return"].to_numpy(float) * scale,
+        )],
         verbose=False,
     )
     return model
-
 
 def _metrics(rows: pd.DataFrame) -> dict:
     """Measure directional and numerical forecast skill vs chronological baselines."""
@@ -246,13 +255,28 @@ def walk_forward_direction(
         )
         calibrator.fit(raw_calibration, calibration["forecast_realized_up"].to_numpy(int))
 
+        testing["forecast_raw_p_up"] = np.clip(raw_test, 0.0, 1.0)
         testing["forecast_p_up"] = np.clip(
             calibrator.transform(raw_test), 0.0, 1.0,
         )
+        scale = parameters.floating("forecast.regression_target_scale")
         testing["forecast_predicted_return"] = (
-            regressor.predict(testing[columns])
+            regressor.predict(testing[columns]) / scale
             if regressor is not None else np.full(len(testing), ret_train)
         )
+        calibration_info = calibration_diagnostics(
+            raw_calibration=raw_calibration,
+            calibration_labels=calibration["forecast_realized_up"].to_numpy(int),
+            raw_test=raw_test,
+            calibrated_test=testing["forecast_p_up"].to_numpy(float),
+            test_labels=testing["forecast_realized_up"].to_numpy(int),
+            baseline_probability=p_train,
+            calibrator=calibrator,
+        )
+        regression_info = tree_diagnostics(
+            regressor, testing["forecast_predicted_return"].to_numpy(float)
+        )
+        direction_info = tree_diagnostics(classifier, raw_test)
         if regressor is not None:
             regression_importances += regressor.feature_importances_
             trained_regressors += 1
@@ -269,6 +293,16 @@ def walk_forward_direction(
             **_fold_boundaries(validation, "early_stopping"),
             **_fold_boundaries(calibration, "calibration"),
             **_fold_boundaries(testing, "test"),
+            "model_diagnostics": {
+                "regression": {
+                    **regression_info,
+                    "target_scale": scale,
+                    "target_unit": "simple_return",
+                    "fit_target_unit": "scaled_simple_return",
+                },
+                "direction": direction_info,
+                "calibration": calibration_info,
+            },
         }
         for left_name, right_name in (
             ("training", "early_stopping"), ("early_stopping", "calibration"),
@@ -389,15 +423,31 @@ def run_direction_backtest(
             sample_columns = (
                 "timestamp", "close", "forecast_future_at_utc",
                 "forecast_realized_return", "forecast_realized_up",
-                "forecast_p_up", "forecast_predicted_return",
+                "forecast_raw_p_up", "forecast_p_up",
+                "forecast_predicted_return",
                 "forecast_baseline_p_up", "forecast_fold",
             )
             outputs.append({
                 "horizon_hours": horizon,
                 "horizon_candles": details["horizon_candles"],
                 "metrics": _metrics(predicted),
+                "confidence_intervals": temporal_block_confidence_intervals(
+                    predicted, horizon_candles=details["horizon_candles"],
+                    samples=parameters.integer("forecast.bootstrap_samples"),
+                    random_state=parameters.integer("xgboost.random_state"),
+                ),
                 "folds": [
-                    {"fold": int(f), "metrics": _metrics(group)}
+                    {
+                        "fold": int(f),
+                        "metrics": _metrics(group),
+                        "model_diagnostics": next(
+                            (
+                                window["model_diagnostics"]
+                                for window in details["fold_windows"]
+                                if int(window["fold"]) == int(f)
+                            ), None,
+                        ),
+                    }
                     for f, group in predicted.groupby("forecast_fold", sort=True)
                 ],
                 "feature_importance": {
@@ -442,6 +492,11 @@ def run_direction_backtest(
                 "no_portfolio_simulation": True,
                 "prediction_target": "BTC close-to-close positive return and simple percentage return",
                 "calibration": "Temporal calibration holdout after early stopping",
+                "regression_target_scale": parameters.floating(
+                    "forecast.regression_target_scale"
+                ),
+                "bootstrap": "Moving-block 95% CI per horizon, stratified by OOS fold",
+                "model_diagnostics": "Raw and calibrated probability bins, best XGBoost tree iterations, actual split nodes and prediction dispersion per fold",
             },
         }
         if audit_writer is not None:
