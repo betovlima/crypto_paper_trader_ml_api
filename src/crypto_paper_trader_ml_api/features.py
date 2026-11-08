@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 
 from .settings_service import RuntimeParameters
+from .mexc import TIMEFRAME_SECONDS
 
 
 def feature_names(parameters: RuntimeParameters) -> list[str]:
@@ -79,8 +80,24 @@ def build_features(
     decision: pd.DataFrame,
     parameters: RuntimeParameters,
     trend: pd.DataFrame | None = None,
+    *,
+    decision_timeframe: str | None = None,
+    trend_timeframe: str | None = None,
 ) -> pd.DataFrame:
+    """Compute indicators using only candles CLOSED at the decision time.
+
+    Market timestamps mark candle OPEN. Align higher-timeframe indicators by
+    candle close availability instead of their opening timestamp.
+    """
+    decision_timeframe = decision_timeframe or parameters.string("backtest.default_decision_timeframe")
+    trend_timeframe = trend_timeframe or parameters.string("backtest.default_trend_timeframe")
+    if decision_timeframe not in TIMEFRAME_SECONDS or trend_timeframe not in TIMEFRAME_SECONDS:
+        raise ValueError("Unknown decision or trend timeframe for causal feature alignment")
     data = decision.copy().sort_values("timestamp").reset_index(drop=True)
+    data["decision_available_at"] = (
+        pd.to_datetime(data["timestamp"], utc=True)
+        + pd.Timedelta(seconds=TIMEFRAME_SECONDS[decision_timeframe])
+    )
     close = data["close"].astype(float)
     high = data["high"].astype(float)
     low = data["low"].astype(float)
@@ -187,6 +204,13 @@ def build_features(
     trend_slope_period = parameters.integer("features.trend_slope_period")
     if trend is not None and not trend.empty:
         trend_frame = trend.copy().sort_values("timestamp")
+        trend_frame["trend_source_open_at"] = pd.to_datetime(
+            trend_frame["timestamp"], utc=True
+        )
+        trend_frame["trend_available_at"] = (
+            trend_frame["trend_source_open_at"]
+            + pd.Timedelta(seconds=TIMEFRAME_SECONDS[trend_timeframe])
+        )
         trend_close = trend_frame["close"].astype(float)
         trend_frame["trend_ema_fast"] = trend_close.ewm(
             span=trend_fast, adjust=False, min_periods=trend_fast
@@ -199,11 +223,16 @@ def build_features(
         ) / trend_close.replace(0, np.nan)
         trend_frame["trend_ema_slope"] = trend_frame["trend_ema_fast"].pct_change(trend_slope_period)
         data = pd.merge_asof(
-            data.sort_values("timestamp"),
-            trend_frame[["timestamp", "trend_ema_gap", "trend_ema_slope"]].sort_values("timestamp"),
-            on="timestamp",
+            data.sort_values("decision_available_at"),
+            trend_frame[[
+                "trend_available_at", "trend_source_open_at",
+                "trend_ema_gap", "trend_ema_slope",
+            ]].sort_values("trend_available_at"),
+            left_on="decision_available_at",
+            right_on="trend_available_at",
             direction="backward",
-        )
+            tolerance=pd.Timedelta(seconds=TIMEFRAME_SECONDS[trend_timeframe]),
+        ).sort_values("timestamp").reset_index(drop=True)
     else:
         data["trend_ema_gap"] = data[f"ema_gap_{medium_ema}_{slow_ema}"]
         fallback_period = parameters.integer("features.fallback_trend_slope_period")
@@ -229,7 +258,7 @@ def create_labels(frame: pd.DataFrame, parameters: RuntimeParameters) -> pd.Data
     exit_target_atr = parameters.floating("labels.exit_target_atr")
     exit_invalidation_atr = parameters.floating("labels.exit_invalidation_atr")
 
-    for index in range(len(data) - horizon - 1):
+    for index in range(len(data) - horizon):
         if not np.isfinite(atr[index]) or atr[index] <= 0:
             continue
         entry = closes[index]
@@ -259,4 +288,8 @@ def create_labels(frame: pd.DataFrame, parameters: RuntimeParameters) -> pd.Data
 
     data["entry_label"] = entry_labels
     data["exit_label"] = exit_labels
+    # The label may depend on the very last candle in the lookahead window.
+    # Its full availability time is used to purge adjacent temporal folds.
+    if "decision_available_at" in data:
+        data["label_available_at"] = data["decision_available_at"].shift(-horizon)
     return data
