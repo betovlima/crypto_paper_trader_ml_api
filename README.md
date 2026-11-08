@@ -2,6 +2,55 @@
 
 Independent API for long-period LightGBM walk-forward backtests. It is separate from the paper-trading API and never sends real orders.
 
+## BTC/CASH V8: Alpaca Crypto trading fees and net reinvested profit
+
+The **new** LightGBM BTC/CASH research campaigns model the published
+Alpaca Crypto spot fee schedule by default. Existing V7 and earlier
+strategies preserve their original fixed-fee economic results.
+
+- Eight official 30-day USD notional volume tiers: maker 0.15%-0%,
+  taker 0.25%-0.10%; both BUY and SELL volume count.
+- Default execution is **TAKER**, because a next-candle market fill cannot
+  claim maker liquidity. A maker quote is implemented for explicit future
+  configuration, but never assumed in the default backtest.
+- Daily fee tier snapshot at 03:00 New York, computed from completed
+  simulated fills in the previous 30 days only. External account trading
+  activity is unknown and assumed zero; this may overstate actual fees.
+- BUY: Alpaca fee is deducted from **BTC credited**; SELL: deducted
+  from **USD credited**. Both are also accounted for as USD-equivalent
+  fees in the audit.
+- Slippage/spread is a **separate estimate**, not misrepresented as an
+  additional Alpaca commission. Initial capital, every reinvested trade,
+  fees, slippage, capital curve, drawdown and final net USD-equivalent
+  profit are included in the simulation.
+- The untouched OOS benchmark **Buy and Hold** is charged using the
+  same Alpaca fee schedule for fairness.
+- A separate Alpaca Crypto account-fee reconciliation should eventually
+  query actual account activities \`CFEE\` / \`FEE\`. This research has no
+  authenticated Alpaca brokerage access and cannot know the user's
+  true commission tier or any fees imposed by intermediaries.
+
+Authoritative documentation:
+https://docs.alpaca.markets/us/docs/crypto-fees
+
+**Important:** archived candles are BTC/USDT from MEXC/Binance, while a
+future Alpaca trade uses BTC/USD. Present results are USD-equivalent
+hypothetical simulations, not actual Alpaca execution prices or realized
+taxable income. Neither exchange spreads nor third-party charges can
+be reconstructed exactly from source candles. The simulator does NOT
+send orders. Each Alpaca crypto order may be subject to a $200,000
+notional order limit and eligibility requirements.
+
+### Net capital formula
+
+- BUY at next open: BTC credited = (cash / (open * (1 + slippage)))
+  * (1 - maker/taker fee).
+- SELL at next open: cash credited = BTC * open * (1 - slippage)
+  * (1 - maker/taker fee).
+- Net strategy profit = final cash - initial cash; all fees and estimated
+  slippage have already been deducted. The report separately records
+  Alpaca fees, slippage estimates, tier at each fill, and fee asset units.
+
 ## BTC/CASH V7: probabilistic entry thresholds and broader pre-OOS validation
 
 The V6 research workflow still uses **only three top-of-screen actions**.
