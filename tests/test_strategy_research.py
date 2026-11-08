@@ -119,7 +119,7 @@ def test_first_candidate_explores_possible_entries_before_random_search():
         np.random.default_rng(42),
     )
     candidate = _candidate(point)
-    assert candidate["policy.entry_probability"] == .5
+    assert candidate["policy.entry_probability"] == .30
     assert candidate["policy.entry_edge"] == 0
     assert candidate["policy.min_positive_votes"] == 1
 
