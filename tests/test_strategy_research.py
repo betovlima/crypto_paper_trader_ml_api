@@ -284,7 +284,7 @@ def test_optimization_freezes_all_model_settings_before_final_execution(monkeypa
         assert "lightgbm.n_estimators" in snapshot
         assert "forecast.regression_target_scale" in snapshot
         assert snapshot["lightgbm.learning_rate"] == result["champion"]["parameters"]["lightgbm.learning_rate"]
-        assert result["summary"]["oos_untouched_from"].startswith("2024-02-01")
+        assert result["summary"]["oos_untouched_from"].startswith("2024-01-01")  # immutable archive cutoff, not mocked data
     finally:
         _cleanup(source)
 
