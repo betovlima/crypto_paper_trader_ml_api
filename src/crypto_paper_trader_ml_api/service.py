@@ -10,6 +10,7 @@ from uuid import uuid4
 from sqlalchemy import desc
 
 from .archive_replay import ArchivedMarketClient, compare_archives, inspect_source_archive
+from .capitalization import compare_capitalization
 from .database import MLBacktestAudit, MLBacktestJob, SessionLocal
 from .engine import run_ml_backtest
 from .mexc import TIMEFRAME_SECONDS
@@ -274,6 +275,29 @@ def get_audit_zip(job_id: str) -> tuple[str | None, bytes | None]:
             return None, None
         record = session.get(MLBacktestAudit, job_id)
         return job.status, record.archive_zip if record is not None else None
+
+
+def capitalize_replay_job(job_id: str, parameters: dict) -> dict:
+    """Compare a completed V2 replay with its original V1 on identical saved data."""
+    with SessionLocal() as session:
+        replay = session.get(MLBacktestJob, job_id)
+        if replay is None:
+            raise LookupError("Execução não encontrada")
+        if replay.status != "COMPLETED" or not replay.replay_parent_job_id:
+            raise ValueError("Selecione um replay V2 concluído com uma execução V1 original")
+        original = session.get(MLBacktestJob, replay.replay_parent_job_id)
+        if original is None or original.status != "COMPLETED":
+            raise ValueError("Execução V1 original ausente ou incompleta")
+        source = session.get(MLBacktestAudit, original.id)
+        candidate = session.get(MLBacktestAudit, replay.id)
+        if source is None or candidate is None:
+            raise ValueError("Auditorias originais V1/V2 indisponíveis no banco")
+        result = compare_capitalization(
+            source.archive_zip, candidate.archive_zip, **parameters
+        )
+        result["source_job_id"] = original.id
+        result["replay_job_id"] = replay.id
+        return result
 
 
 def cancel_job(job_id: str) -> dict | None:
