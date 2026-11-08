@@ -16,6 +16,8 @@ def test_health_and_database_configuration() -> None:
     assert configuration.json()["source"] == "DATABASE"
     assert configuration.json()["defaults"]["symbol"]
     assert configuration.json()["options"]["decision_timeframes"]
+    assert configuration.json()["options"]["history_sources"] == ["MEXC", "BINANCE_SPOT_ARCHIVE"]
+    assert configuration.json()["defaults"]["history_source"] in {"MEXC", "BINANCE_SPOT_ARCHIVE"}
     assert configuration.json()["ui"]["job_poll_interval_ms"] > 0
     assert settings.status_code == 200
     assert len(settings.json()["parameters"]) > 50

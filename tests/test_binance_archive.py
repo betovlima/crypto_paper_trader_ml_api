@@ -201,3 +201,15 @@ def test_source_is_explicit_and_rejects_unknown_values():
     assert MLBacktestCreate(history_source="BINANCE_SPOT_ARCHIVE").history_source == "BINANCE_SPOT_ARCHIVE"
     with pytest.raises(ValueError):
         MLBacktestCreate(history_source="MEXC_PLUS_BINANCE")
+
+
+def test_explicit_history_source_is_persisted_in_resolved_job_configuration():
+    from crypto_paper_trader_ml_api.service import _resolve_request
+    chosen = _resolve_request(
+        MLBacktestCreate(symbol="BTCUSDT", history_source="BINANCE_SPOT_ARCHIVE"),
+        default_parameters(),
+    )
+    assert chosen.history_source == "BINANCE_SPOT_ARCHIVE"
+    assert chosen.model_dump()["history_source"] == "BINANCE_SPOT_ARCHIVE"
+    legacy = _resolve_request(MLBacktestCreate(symbol="BTCUSDT"), default_parameters())
+    assert legacy.history_source == "MEXC"
