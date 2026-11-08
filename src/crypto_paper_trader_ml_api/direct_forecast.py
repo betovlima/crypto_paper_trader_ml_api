@@ -443,6 +443,7 @@ def run_direction_backtest(
             "experiment_type": EXPERIMENT,
             "summary": {"experiment_type": EXPERIMENT, "financial_trading_enabled": False},
             "execution": {
+                "model_family": "LightGBM",
                 "decision_timeframe": request.decision_timeframe,
                 "trend_timeframe": request.trend_timeframe,
                 "history_source": request.history_source,
