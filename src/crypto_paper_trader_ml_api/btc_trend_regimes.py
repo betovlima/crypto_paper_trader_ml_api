@@ -310,10 +310,11 @@ def simulate_policy(frame: pd.DataFrame, lo: int, hi: int, policy: str, *,
     last_trade_index, last_exit_index = -100000, -100000
     actions, equity = [], []
     previous_at = None
+    pending = None
     min_hold_bars = 48 if policy not in ("WEEKLY_TREND_FILTER",) else 7 * 48
 
     def trade(target: float, price: float, at: pd.Timestamp, index: int,
-              reason: str, signal_at: str | None) -> None:
+              reason: str, signal_at: str | None, signal_price: float | None = None) -> None:
         nonlocal cash, units, fees, slip_paid, buy_count, sell_count
         nonlocal last_target, peak_close, last_trade_index, last_exit_index, complete_exits
         current_value = cash + units * price
@@ -359,6 +360,7 @@ def simulate_policy(frame: pd.DataFrame, lo: int, hi: int, policy: str, *,
             actions.append({
                 "policy": policy, "action": side,
                 "timestamp": at.isoformat(), "signal_at": signal_at,
+                "signal_price": signal_price,
                 "execution_candle_index": index, "execution_price": price,
                 "target_fraction": target, "reason": reason,
                 "fee_rate": fee_rate, "fee_tier": quote["tier"],
@@ -372,12 +374,25 @@ def simulate_policy(frame: pd.DataFrame, lo: int, hi: int, policy: str, *,
         opening, close = float(frame.at[i, "open"]), float(frame.at[i, "close"])
         gap = previous_at is not None and (at - previous_at).total_seconds() != source_seconds
         previous_at = at
-        if gap and units > 0:
-            trade(0.0, opening, at, i, "DATA_GAP_EXIT", None)
+
+        # Signal at a completed 4h/daily bar end T must wait for an entire
+        # intervening 30m candle. The earliest fill is at OPEN T+30min.
+        # Missing bars cancel the signal; never fill at a later unknown price.
+        if gap:
+            pending = None
+            if units > 0:
+                trade(0.0, opening, at, i, "DATA_GAP_EXIT", None)
+        if pending is not None:
+            if at == pending["execute_at"]:
+                if at <= pending["signal_timestamp"]:
+                    raise AssertionError("Sinal executado sem latência conservadora")
+                trade(pending["target"], opening, at, i, pending["reason"],
+                      pending["signal_timestamp"].isoformat(), pending["signal_price"])
+            pending = None
+
         available = decision_map.get(at, {})
         desired = last_target
         reason = None
-        decision_at = None
         if not gap:
             for period in ("4h", "1d"):
                 if period not in available:
@@ -385,21 +400,24 @@ def simulate_policy(frame: pd.DataFrame, lo: int, hi: int, policy: str, *,
                 row, daily, weekly = available[period]
                 proposed, cause = _target(policy, period, row, daily, weekly, desired, peak_close)
                 if abs(proposed - desired) >= REBALANCE_MIN_CHANGE:
-                    desired, reason, decision_at = proposed, cause, at.isoformat()
+                    desired, reason = proposed, cause
             if reason is not None:
-                if (desired > last_target and i - last_exit_index < 48):
-                    pass  # minimum 24h after full exit
-                elif (desired > 0 and last_target > 0 and abs(desired-last_target) < REBALANCE_MIN_CHANGE):
-                    pass
+                allowed = True
+                if desired > last_target and i - last_exit_index < 48:
+                    allowed = False
+                elif desired > 0 and last_target > 0 and abs(desired-last_target) < REBALANCE_MIN_CHANGE:
+                    allowed = False
                 elif desired < last_target and reason == "HYSTERESIS":
-                    pass
-                elif desired < last_target and (
-                    reason not in ("DONCHIAN_OR_ATR_EXIT", "BEARISH_CASH") and
-                    i - last_trade_index < min_hold_bars
-                ):
-                    pass
-                else:
-                    trade(desired, opening, at, i, reason, decision_at)
+                    allowed = False
+                elif desired < last_target and (reason not in ("DONCHIAN_OR_ATR_EXIT", "BEARISH_CASH")
+                    and i - last_trade_index < min_hold_bars):
+                    allowed = False
+                if allowed:
+                    pending = {
+                        "target": desired, "reason": reason,
+                        "signal_timestamp": at, "signal_price": float(frame.at[i - 1, "close"]) if i > 0 else close,
+                        "execute_at": at + timedelta(seconds=source_seconds),
+                    }
         if units > 0:
             peak_close = max(peak_close, close)
         value = cash + units * close
@@ -435,7 +453,7 @@ def simulate_policy(frame: pd.DataFrame, lo: int, hi: int, policy: str, *,
         "start": frame.at[lo, "timestamp"].isoformat(),
         "end": frame.at[hi-1, "timestamp"].isoformat(),
         "fee_model": ALPACA_FEE_MODEL,
-        "execution_rule": "Sinal somente no fechamento completo UTC 4h/1d/1w; preenchimento no próximo OPEN 30m; saída no fechamento final",
+        "execution_rule": "Sinal no fechamento confirmado T (4h, diário ou semanal); ordem simulada na abertura T+30min após candle intermediário; liquidação final sintética separada.",
     }
     if include_actions:
         result["actions"] = actions
