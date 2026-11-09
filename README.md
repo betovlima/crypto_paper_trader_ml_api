@@ -2,6 +2,83 @@
 
 Independent API for long-period LightGBM walk-forward backtests. It is separate from the paper-trading API and never sends real orders.
 
+## BTC event-driven research V11: CUSUM and Triple Barrier
+
+V11 adds a new **"BTC: CUSUM + Triple Barrier"** mode to the existing
+research mode selector. It uses exactly the same three top buttons:
+**Create Strategy**, **Research BTC Events**, **Export ZIP**.
+It needs only the BTC OHLCV source archive already stored inside the ML API.
+There are no external scripts, no new environment parameters, no downloads
+for each run, and no live brokerage operations.
+
+This initial study deliberately **does not train LightGBM** or run OOS.
+It asks whether four predetermined BTC price-event rules have any net
+economic evidence before adding an ML model:
+
+1. Buy BTC on a confirmed positive CUSUM breakout.
+2. Buy BTC on a confirmed negative CUSUM move (contrarian dip).
+3. Buy BTC if a confirmed negative CUSUM move is followed by a recovery
+   close on the immediately following candle.
+4. Buy BTC on a positive CUSUM event only in a high-volatility regime.
+
+Both a perpetually idle **CASH** account and a **BUY_HOLD** BTC account
+serve as baselines. They are charged under the same Alpaca Taker tier model
+and slippage assumptions as the event policies.
+
+### Fixed mathematical assumptions (before looking at OOS)
+
+- Input: archived 30-minute BTC/USDT OHLCV. More granular candles can be
+  supported in future studies if they are actually archived.
+- CUSUM operates on confirmed close-to-close log returns with threshold
+  \`max(0.8%, 2.2 * past-24h-vol * sqrt(3600/bar_seconds))\`.
+- Regime filter is \`past-24h-vol > 1.25 * past-7d-vol\`.
+- Study labels use a six-hour vertical barrier and adaptive price thresholds
+  fixed at each candidate event:
+  upper \`max(1.2%, 2 * sigma * sqrt(number_of_6h_bars))\`;
+  lower \`max(0.9%, 1.3 * sigma * sqrt(number_of_6h_bars))\`.
+- If high AND low cross their barriers in the **same candle**, their order
+  cannot be inferred: study label is **AMBIGUOUS_BOTH_CONSERVATIVE_LOSS**.
+- Trade signals are visible only after the event candle closes. All orders
+  are filled at the **next opening price**, with dynamic Alpaca Taker fees
+  plus separately estimated slippage. Barrier touches may prompt an exit
+  only at the NEXT candle opening, never at an invented intrabar price.
+- Only one buy/sell operation per candle. Open positions at segment end are
+  liquidated at the final observed close and explicitly documented.
+- Gaps in the archived candles are recorded, and a gap is never treated as
+  a price event. Gap exits are counted separately.
+
+### Chronological research contract
+
+- Use **only candles strictly before the first archived OOS boundary**.
+- The initial 60% of that history is development, with a 24-bar embargo;
+  the remaining 40% is untouched pre-OOS validation.
+- Four policy rules are frozen before running them. Any candidate suggested
+  for further investigation is selected **only by development profitability
+  and risk**, then checked on pre-OOS validation.
+- \`RESEARCH_COMPLETE\` is a diagnostic study status, not permission to
+  trade. \`result_status\` indicates whether the fixed rules offer sufficient
+  *internal* evidence. **No ML strategy is created and no automatic OOS/live
+  trading job is scheduled**, even if the caller sends \`auto_execute=true\`.
+- Old strategies and their immutable audits keep their previous behavior.
+
+### Audit export
+
+The existing **Export ZIP** action includes:
+
+- \`event_research.json\`: fixed parameters, time boundaries, labels,
+  profitability and risks for all four policies and both baselines.
+- \`event_research_portfolios.csv\`: development and validation finance.
+- \`event_trade_actions.csv\`: COMPLETE, reproducibly reconstructed trade
+  log, by policy and period, with timestamps, prices, costs and exit reasons.
+- \`source_historical_audit.zip\`: original archived historical data.
+
+**Limits:** BTC/USDT from Binance is only a USD-equivalent proxy for Alpaca
+BTC/USD. The 30-minute OHLCV bars cannot reconstruct intrabar order
+sequence, order-book imbalance, true Alpaca bid/ask spreads, liquidation
+flow, or market execution at stop levels. A future 1-minute or tick archive
+is required to investigate these more precisely. This is not a validated
+trading system and not an independent test of a previously seen OOS period.
+
 ## BTC/CASH V10: stress of the *same operations* and forecast-quality diagnostics
 
 V10 fixes an important flaw in V9: increasing execution costs could cause
