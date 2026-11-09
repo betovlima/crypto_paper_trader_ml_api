@@ -13,6 +13,7 @@ on:
       - feature/btc-frozen-stress-v10-20261108
       - feature/btc-event-driven-research-v11-20261108
       - feature/btc-directional-change-v12-20261108
+      - feature/btc-directional-change-v13-technical-20261109
   workflow_dispatch:
 
 jobs:

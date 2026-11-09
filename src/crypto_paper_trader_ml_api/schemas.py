@@ -94,7 +94,7 @@ class MLResearchStrategyCreate(BaseModel):
 
 
 class MLStrategyTuneRequest(BaseModel):
-    mode: Literal["QUICK", "BAYESIAN", "EVENTS", "DIRECTIONAL_CHANGE"]
+    mode: Literal["QUICK", "BAYESIAN", "EVENTS", "DIRECTIONAL_CHANGE", "TECHNICAL"]
     trials: int = Field(default=8, ge=4, le=40)
     # One click starts optimization and automatically schedules the final OOS run.
     auto_execute: bool = False

@@ -36,6 +36,7 @@ from .frozen_cost_replay import replay_frozen_rotations
 from .forecast_quality import describe_return_predictions
 from .btc_event_research import evaluate_archived_event_research, POLICIES as BTC_EVENT_POLICIES
 from .btc_directional_change import evaluate_archived_directional_change, THRESHOLDS as BTC_DC_THRESHOLDS
+from .btc_technical_research import evaluate_archived_technical_research, POLICIES as BTC_TECHNICAL_POLICIES
 from .selection_robustness import (
     assess_robustness, STRESS_FEE_MULTIPLIER, STRESS_SLIPPAGE_MULTIPLIER,
     MIN_COMPLETED_CYCLES, MIN_ACTIVE_SEGMENTS, MIN_PROFITABLE_SEGMENTS,
@@ -749,6 +750,9 @@ def _run_event_research(strategy_id: str) -> None:
         if research_mode == "DIRECTIONAL_CHANGE":
             experiment = evaluate_archived_directional_change(archive)
             candidate_count = len(BTC_DC_THRESHOLDS)
+        elif research_mode == "TECHNICAL":
+            experiment = evaluate_archived_technical_research(archive)
+            candidate_count = len(BTC_TECHNICAL_POLICIES)
         else:
             experiment = evaluate_archived_event_research(archive)
             candidate_count = len(BTC_EVENT_POLICIES)
@@ -1035,12 +1039,14 @@ def _run_optimization(strategy_id: str) -> None:
 
 
 def start_optimization(strategy_id: str, *, mode: str, trials: int, auto_execute: bool = False) -> dict:
-    if mode not in {"QUICK", "BAYESIAN", "EVENTS", "DIRECTIONAL_CHANGE"}:
+    if mode not in {"QUICK", "BAYESIAN", "EVENTS", "DIRECTIONAL_CHANGE", "TECHNICAL"}:
         raise ValueError("Modo de otimização inválido")
     if mode == "EVENTS" and trials != len(BTC_EVENT_POLICIES):
         raise ValueError("A pesquisa por eventos usa quatro políticas pré-definidas")
     if mode == "DIRECTIONAL_CHANGE" and trials != len(BTC_DC_THRESHOLDS):
         raise ValueError("Directional Change usa quatro limites fixados previamente")
+    if mode == "TECHNICAL" and trials != len(BTC_TECHNICAL_POLICIES):
+        raise ValueError("A análise técnica compara as seis políticas pré-definidas")
     if not 4 <= trials <= MAX_TRIALS:
         raise ValueError("Quantidade de tentativas fora dos limites")
     with SessionLocal.begin() as session:
@@ -1064,7 +1070,7 @@ def start_optimization(strategy_id: str, *, mode: str, trials: int, auto_execute
     from .service import _get_executor
     from .settings_service import get_runtime_parameters
     _get_executor(get_runtime_parameters()).submit(
-        _run_event_research if mode in {"EVENTS", "DIRECTIONAL_CHANGE"} else _run_optimization,
+        _run_event_research if mode in {"EVENTS", "DIRECTIONAL_CHANGE", "TECHNICAL"} else _run_optimization,
         strategy_id,
     )
     return get_strategy(strategy_id)
@@ -1185,10 +1191,33 @@ def export_strategy_report(strategy_id: str) -> bytes:
                         m.get("slippage_usd_estimate"),
                     ])
             z.writestr("directional_change_portfolios.csv", dc_csv.getvalue())
+        if strategy["mode"] == "TECHNICAL":
+            z.writestr(
+                "technical_research.json",
+                json.dumps({"summary": strategy["summary"], "trials": strategy["trials"]},
+                           ensure_ascii=False, indent=2, allow_nan=False),
+            )
+            technical_csv = StringIO()
+            writer = csv.writer(technical_csv)
+            writer.writerow(["policy", "partition", "capital_final", "return_total",
+                             "max_drawdown", "sharpe", "completed_cycles",
+                             "exposure", "fees_paid", "slippage"])
+            for trial in strategy["trials"]:
+                for part, row in (("development", trial["metrics"]["development"]),
+                                  ("validation", trial["metrics"])):
+                    writer.writerow([
+                        trial["parameters"]["policy"], part, row.get("capital_final"),
+                        row.get("return_total"), row.get("max_drawdown"),
+                        row.get("sharpe"), row.get("completed_cycles"),
+                        row.get("exposure"), row.get("fees_paid"),
+                        row.get("slippage_usd_estimate"),
+                    ])
+            z.writestr("technical_research_portfolios.csv", technical_csv.getvalue())
         z.writestr("README.txt", (
             "BTC/CASH audited research: LightGBM or BTC-specific CUSUM event study.\n"
             "EVENTS: event_research.json, event_research_portfolios.csv and event_trade_actions.csv.\\n"
             "DIRECTIONAL_CHANGE: directional_change.json, _portfolios.csv, _extrema.csv, _trades.csv.\\n"
+            "TECHNICAL: technical_research.json, _portfolios.csv, _trades.csv.\\n"
             "strategy.json: strategy and optimization metadata\n"
             "optimization_trials.csv: model and BTC/CASH policy candidates\n"
             "source_historical_audit.zip: immutable source data and labels\n"
@@ -1222,6 +1251,23 @@ def export_strategy_report(strategy_id: str) -> bytes:
                             "fee_usd", "slippage_usd", "capital_after",
                         )])
                     z.writestr("event_trade_actions.csv", trades_csv.getvalue())
+
+                if strategy["mode"] == "TECHNICAL":
+                    research = evaluate_archived_technical_research(
+                        source.archive_zip, include_details=True,
+                    )
+                    if research["trials"] != strategy["trials"]:
+                        raise ValueError("Auditoria técnica diverge da pesquisa persistida")
+                    actions_csv = StringIO()
+                    writer = csv.writer(actions_csv)
+                    fields = ["policy", "partition", "action", "timestamp", "signal_at",
+                              "execution_candle_index", "execution_price", "reason",
+                              "fee_rate", "fee_tier", "fee_usd", "slippage_usd",
+                              "capital_after", "net_profit_usd"]
+                    writer.writerow(fields)
+                    for action in research["trades"]:
+                        writer.writerow([action.get(k) for k in fields])
+                    z.writestr("technical_research_trades.csv", actions_csv.getvalue())
 
                 if strategy["mode"] == "DIRECTIONAL_CHANGE":
                     dc = evaluate_archived_directional_change(
