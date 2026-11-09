@@ -2,6 +2,62 @@
 
 Independent API for long-period LightGBM walk-forward backtests. It is separate from the paper-trading API and never sends real orders.
 
+## BTC Directional Change V12: retrospective BTC highs/lows and confirmed reversals
+
+V12 adds a fourth VISIBLE research type: BTC maxima/minima using Directional
+Change. It reuses exactly the existing three toolbar actions (Create, Research,
+Export ZIP). The ML API does not run LightGBM, OOS or real brokerage orders.
+
+Four thresholds were frozen before reviewing the results:
+
+* 1 percent reversal from the most recent closing-price pivot.
+* 2 percent reversal.
+* 3 percent reversal.
+* Volatility-adaptive reversal: 1.2 times past-24-hour close-return
+  volatility scaled to 24 hours, capped from 1 to 4 percent. The threshold
+  is frozen at the time the candidate pivot is observed, and cannot see
+  prices or volatility from future candles.
+
+A historical BOTTOM pivot is a lowest candle CLOSE. It becomes a CONFIRMED
+BOTTOM only when a later CLOSE increases at least the threshold. A TOP
+requires a corresponding later CLOSE decline. Signals alternate, and BTC/CASH
+fills happen at the NEXT candle OPEN after confirmation, never at the
+historical pivot price. Historical absolute OHLC low/high prices are
+reported separately and NEVER used for trading signals.
+
+A timestamp gap resets the event detector, suppresses an entry across the
+gap, and exits an existing BTC holding at the next known candle opening.
+Only one action per candle is allowed. At each partition end, any open
+position is liquidated at the final known CLOSE and recorded as such.
+
+The chronological development partition starts after the first 5 percent
+of pre-OOS history and ends before 60 percent with a 48-candle embargo.
+Validation is the last 40 percent strictly BEFORE the first archived OOS.
+The first OOS itself stays unexamined during the automated study.
+Both partitions restart at 10,000 USD equivalent with Alpaca dynamic
+Taker fee tiers, full capital reinvestment and separate slippage. CASH
+and BTC Buy-and-Hold are comparable baselines.
+
+The Front displays absolute OHLC extremes and historical closing-price
+pivots, plus their later confirmation points. A price chart shows recent
+validation prices, pivot timestamps and confirmation timestamps separately.
+
+The existing Export ZIP adds these files:
+* directional_change.json: frozen threshold definitions and saved metrics.
+* directional_change_portfolios.csv: all four strategies and time partitions.
+* directional_change_extrema.csv: ALL historical pivot prices and timestamps,
+  confirmation prices and timestamps, thresholds, confirmation lags.
+* directional_change_trades.csv: ALL fills at next opening, entry/exit
+  reason, pivot, confirmation, price, commission, slippage and compounded
+  account equity.
+* source_historical_audit.zip: immutable BTC candles as originally archived.
+
+Limits: BTCUSDT represents an approximate USD-equivalent proxy to Alpaca
+BTCUSD; archived 30-minute OHLCV lacks the order book, spreads, actual
+Alpaca fills and intrabar ordering. Previously inspected historical OOS
+does not count as a fresh independent external validation. These are
+research results, not authorization for live trading.
+
 ## BTC event-driven research V11: CUSUM and Triple Barrier
 
 V11 adds a new **"BTC: CUSUM + Triple Barrier"** mode to the existing
