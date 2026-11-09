@@ -35,6 +35,7 @@ from .alpaca_fees import ALPACA_FEE_MODEL, AlpacaFeeLedger, round_trip_cost
 from .frozen_cost_replay import replay_frozen_rotations
 from .forecast_quality import describe_return_predictions
 from .btc_event_research import evaluate_archived_event_research, POLICIES as BTC_EVENT_POLICIES
+from .btc_directional_change import evaluate_archived_directional_change, THRESHOLDS as BTC_DC_THRESHOLDS
 from .selection_robustness import (
     assess_robustness, STRESS_FEE_MULTIPLIER, STRESS_SLIPPAGE_MULTIPLIER,
     MIN_COMPLETED_CYCLES, MIN_ACTIVE_SEGMENTS, MIN_PROFITABLE_SEGMENTS,
@@ -744,7 +745,13 @@ def _run_event_research(strategy_id: str) -> None:
             if audit is None:
                 raise ValueError("Auditoria BTC histórica indisponível")
             archive = audit.archive_zip
-        experiment = evaluate_archived_event_research(archive)
+            research_mode = row.mode
+        if research_mode == "DIRECTIONAL_CHANGE":
+            experiment = evaluate_archived_directional_change(archive)
+            candidate_count = len(BTC_DC_THRESHOLDS)
+        else:
+            experiment = evaluate_archived_event_research(archive)
+            candidate_count = len(BTC_EVENT_POLICIES)
         with SessionLocal() as session:
             row = session.get(MLResearchStrategy, strategy_id)
             if row is None or row.status == "CANCEL_REQUESTED":
@@ -752,10 +759,11 @@ def _run_event_research(strategy_id: str) -> None:
                 return
         summary = {
             **experiment["summary"],
-            "trials_target": len(BTC_EVENT_POLICIES),
+            "trials_target": candidate_count,
             "completed_trials": len(experiment["trials"]),
             "selection_warning": (
-                "Pesquisa de oportunidades em BTC com regras fixas e validação cronológica pré-OOS. "
+                "Pesquisa BTC com regras fixas e validação cronológica pré-OOS. "
+                "Topos e fundos históricos só são confirmados depois do movimento. "
                 "Não existe modelo aprovado para negociação nem execução OOS automática nesta modalidade."
             ),
         }
@@ -1027,10 +1035,12 @@ def _run_optimization(strategy_id: str) -> None:
 
 
 def start_optimization(strategy_id: str, *, mode: str, trials: int, auto_execute: bool = False) -> dict:
-    if mode not in {"QUICK", "BAYESIAN", "EVENTS"}:
+    if mode not in {"QUICK", "BAYESIAN", "EVENTS", "DIRECTIONAL_CHANGE"}:
         raise ValueError("Modo de otimização inválido")
     if mode == "EVENTS" and trials != len(BTC_EVENT_POLICIES):
         raise ValueError("A pesquisa por eventos usa quatro políticas pré-definidas")
+    if mode == "DIRECTIONAL_CHANGE" and trials != len(BTC_DC_THRESHOLDS):
+        raise ValueError("Directional Change usa quatro limites fixados previamente")
     if not 4 <= trials <= MAX_TRIALS:
         raise ValueError("Quantidade de tentativas fora dos limites")
     with SessionLocal.begin() as session:
@@ -1054,7 +1064,7 @@ def start_optimization(strategy_id: str, *, mode: str, trials: int, auto_execute
     from .service import _get_executor
     from .settings_service import get_runtime_parameters
     _get_executor(get_runtime_parameters()).submit(
-        _run_event_research if mode == "EVENTS" else _run_optimization,
+        _run_event_research if mode in {"EVENTS", "DIRECTIONAL_CHANGE"} else _run_optimization,
         strategy_id,
     )
     return get_strategy(strategy_id)
@@ -1150,9 +1160,35 @@ def export_strategy_report(strategy_id: str) -> bytes:
                         row.get("gap_exits"),
                     ])
             z.writestr("event_research_portfolios.csv", event_csv.getvalue())
+        if strategy["mode"] == "DIRECTIONAL_CHANGE":
+            z.writestr(
+                "directional_change.json",
+                json.dumps({"summary": strategy["summary"], "trials": strategy["trials"]},
+                           ensure_ascii=False, indent=2, allow_nan=False),
+            )
+            dc_csv = StringIO()
+            dc_writer = csv.writer(dc_csv)
+            dc_writer.writerow([
+                "policy", "period", "capital_final", "net_profit_usd",
+                "completed_cycles", "confirmed_bottoms", "confirmed_tops",
+                "median_lag_candles", "max_drawdown", "fees_paid", "slippage",
+            ])
+            for item in strategy["trials"]:
+                for part, m in (("development", item["metrics"]["development"]),
+                                ("validation", item["metrics"])):
+                    dc_writer.writerow([
+                        item["parameters"]["policy"], part, m.get("capital_final"),
+                        m.get("net_profit_usd"), m.get("completed_cycles"),
+                        m.get("confirmed_bottoms"), m.get("confirmed_tops"),
+                        m.get("median_confirmation_lag_candles"),
+                        m.get("max_drawdown"), m.get("fees_paid"),
+                        m.get("slippage_usd_estimate"),
+                    ])
+            z.writestr("directional_change_portfolios.csv", dc_csv.getvalue())
         z.writestr("README.txt", (
             "BTC/CASH audited research: LightGBM or BTC-specific CUSUM event study.\n"
-            "EVENTS: event_research.json, event_research_portfolios.csv and event_trade_actions.csv.\n"
+            "EVENTS: event_research.json, event_research_portfolios.csv and event_trade_actions.csv.\\n"
+            "DIRECTIONAL_CHANGE: directional_change.json, _portfolios.csv, _extrema.csv, _trades.csv.\\n"
             "strategy.json: strategy and optimization metadata\n"
             "optimization_trials.csv: model and BTC/CASH policy candidates\n"
             "source_historical_audit.zip: immutable source data and labels\n"
@@ -1186,6 +1222,41 @@ def export_strategy_report(strategy_id: str) -> bytes:
                             "fee_usd", "slippage_usd", "capital_after",
                         )])
                     z.writestr("event_trade_actions.csv", trades_csv.getvalue())
+
+                if strategy["mode"] == "DIRECTIONAL_CHANGE":
+                    dc = evaluate_archived_directional_change(
+                        source.archive_zip, include_details=True,
+                    )
+                    if dc["trials"] != strategy["trials"]:
+                        raise ValueError("Auditoria histórica de extremos não reproduz a pesquisa persistida")
+                    extrema_csv = StringIO()
+                    extrema_writer = csv.writer(extrema_csv)
+                    extrema_fields = [
+                        "policy", "partition", "kind", "pivot_index",
+                        "pivot_timestamp", "pivot_close", "confirmed_index",
+                        "confirmed_at", "confirmed_close", "threshold_fraction",
+                        "lag_candles", "confirmation_move_fraction",
+                    ]
+                    extrema_writer.writerow(extrema_fields)
+                    for item in dc["extrema"]:
+                        extrema_writer.writerow([item.get(key) for key in extrema_fields])
+                    z.writestr("directional_change_extrema.csv", extrema_csv.getvalue())
+
+                    trade_csv = StringIO()
+                    trade_writer = csv.writer(trade_csv)
+                    trade_fields = [
+                        "policy", "partition", "action", "timestamp",
+                        "execution_candle_index", "execution_price", "reason",
+                        "signal_type", "pivot_timestamp", "pivot_close",
+                        "confirmed_at", "confirmed_close",
+                        "confirmation_lag_candles", "threshold_fraction",
+                        "fee_rate", "fee_tier", "fee_usd", "slippage_usd",
+                        "notional_usd", "capital_after", "cycle_net_profit_usd",
+                    ]
+                    trade_writer.writerow(trade_fields)
+                    for item in dc["trades"]:
+                        trade_writer.writerow([item.get(key) for key in trade_fields])
+                    z.writestr("directional_change_trades.csv", trade_csv.getvalue())
 
             job = session.get(MLBacktestJob, strategy["execution_job_id"]) if strategy["execution_job_id"] else None
             audit = session.get(MLBacktestAudit, job.id) if job and job.status == "COMPLETED" else None
