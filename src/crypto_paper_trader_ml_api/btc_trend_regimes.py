@@ -294,12 +294,12 @@ def simulate_policy(frame: pd.DataFrame, lo: int, hi: int, policy: str, *,
                     continue
                 row, daily, weekly = available[period]
                 proposed, cause = _target(policy, period, row, daily, weekly, desired, peak_close)
-                if abs(proposed - desired) >= REBAlANCE_MIN_CHANGE:
+                if abs(proposed - desired) >= REBALANCE_MIN_CHANGE:
                     desired, reason, decision_at = proposed, cause, at.isoformat()
             if reason is not None:
                 if (desired > last_target and i - last_exit_index < 48):
                     pass  # minimum 24h after full exit
-                elif (desired > 0 and last_target > 0 and abs(desired-last_target) < REBAlANCE_MIN_CHANGE):
+                elif (desired > 0 and last_target > 0 and abs(desired-last_target) < REBALANCE_MIN_CHANGE):
                     pass
                 elif desired < last_target and reason == "HYSTERESIS":
                     pass
