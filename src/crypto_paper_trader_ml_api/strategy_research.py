@@ -34,6 +34,7 @@ from .btc_policy import DEFAULT_POLICY, aggregate_signals, simulate_rotations, v
 from .alpaca_fees import ALPACA_FEE_MODEL, AlpacaFeeLedger, round_trip_cost
 from .frozen_cost_replay import replay_frozen_rotations
 from .forecast_quality import describe_return_predictions
+from .btc_event_research import evaluate_archived_event_research, POLICIES as BTC_EVENT_POLICIES
 from .selection_robustness import (
     assess_robustness, STRESS_FEE_MULTIPLIER, STRESS_SLIPPAGE_MULTIPLIER,
     MIN_COMPLETED_CYCLES, MIN_ACTIVE_SEGMENTS, MIN_PROFITABLE_SEGMENTS,
@@ -731,6 +732,44 @@ def _update_strategy(strategy_id: str, **fields) -> None:
         row.updated_at = _now()
 
 
+def _run_event_research(strategy_id: str) -> None:
+    """A separate, auditable event experiment; no LightGBM or automatic OOS."""
+    try:
+        with SessionLocal() as session:
+            row = session.get(MLResearchStrategy, strategy_id)
+            if row is None or row.status == "CANCEL_REQUESTED":
+                _update_strategy(strategy_id, status="CANCELLED", error_message=None)
+                return
+            audit = session.get(MLBacktestAudit, row.source_job_id)
+            if audit is None:
+                raise ValueError("Auditoria BTC histórica indisponível")
+            archive = audit.archive_zip
+        experiment = evaluate_archived_event_research(archive)
+        with SessionLocal() as session:
+            row = session.get(MLResearchStrategy, strategy_id)
+            if row is None or row.status == "CANCEL_REQUESTED":
+                _update_strategy(strategy_id, status="CANCELLED", error_message=None)
+                return
+        summary = {
+            **experiment["summary"],
+            "trials_target": len(BTC_EVENT_POLICIES),
+            "completed_trials": len(experiment["trials"]),
+            "selection_warning": (
+                "Pesquisa de oportunidades em BTC com regras fixas e validação cronológica pré-OOS. "
+                "Não existe modelo aprovado para negociação nem execução OOS automática nesta modalidade."
+            ),
+        }
+        _update_strategy(
+            strategy_id, status="RESEARCH_COMPLETE", progress=100,
+            trials_json=json.dumps(experiment["trials"], allow_nan=False),
+            champion_json=None,
+            summary_json=json.dumps(summary, allow_nan=False),
+            error_message=None,
+        )
+    except Exception as exc:
+        _update_strategy(strategy_id, status="FAILED", error_message=str(exc)[:1000])
+
+
 def _run_optimization(strategy_id: str) -> None:
     try:
         with SessionLocal() as session:
@@ -988,8 +1027,10 @@ def _run_optimization(strategy_id: str) -> None:
 
 
 def start_optimization(strategy_id: str, *, mode: str, trials: int, auto_execute: bool = False) -> dict:
-    if mode not in {"QUICK", "BAYESIAN"}:
+    if mode not in {"QUICK", "BAYESIAN", "EVENTS"}:
         raise ValueError("Modo de otimização inválido")
+    if mode == "EVENTS" and trials != len(BTC_EVENT_POLICIES):
+        raise ValueError("A pesquisa por eventos usa quatro políticas pré-definidas")
     if not 4 <= trials <= MAX_TRIALS:
         raise ValueError("Quantidade de tentativas fora dos limites")
     with SessionLocal.begin() as session:
@@ -1012,7 +1053,10 @@ def start_optimization(strategy_id: str, *, mode: str, trials: int, auto_execute
     # Shared job executor; no background promises and no shell scripts.
     from .service import _get_executor
     from .settings_service import get_runtime_parameters
-    _get_executor(get_runtime_parameters()).submit(_run_optimization, strategy_id)
+    _get_executor(get_runtime_parameters()).submit(
+        _run_event_research if mode == "EVENTS" else _run_optimization,
+        strategy_id,
+    )
     return get_strategy(strategy_id)
 
 
@@ -1079,8 +1123,36 @@ def export_strategy_report(strategy_id: str) -> bytes:
                 json.dumps(item["parameters"], sort_keys=True), item.get("error"),
             ])
         z.writestr("optimization_trials.csv", csv_buffer.getvalue())
+        if strategy["mode"] == "EVENTS":
+            z.writestr(
+                "event_research.json",
+                json.dumps({
+                    "summary": strategy["summary"],
+                    "trials": strategy["trials"],
+                }, ensure_ascii=False, indent=2, allow_nan=False),
+            )
+            event_csv = StringIO()
+            event_writer = csv.writer(event_csv)
+            event_writer.writerow([
+                "policy", "period", "capital_final", "net_profit_usd",
+                "completed_cycles", "max_drawdown", "fees_paid", "slippage",
+                "ambiguous_exits", "gap_exits",
+            ])
+            for item in strategy["trials"]:
+                metrics = item.get("metrics") or {}
+                for part, row in (("development", metrics.get("development", {})),
+                                  ("validation", metrics)):
+                    event_writer.writerow([
+                        item["parameters"]["policy"], part, row.get("capital_final"),
+                        row.get("net_profit_usd"), row.get("completed_cycles"),
+                        row.get("max_drawdown"), row.get("fees_paid"),
+                        row.get("slippage_usd_estimate"), row.get("ambiguous_barrier_exits"),
+                        row.get("gap_exits"),
+                    ])
+            z.writestr("event_research_portfolios.csv", event_csv.getvalue())
         z.writestr("README.txt", (
-            "BTC/CASH LightGBM research audit\n"
+            "BTC/CASH audited research: LightGBM or BTC-specific CUSUM event study.\\n"
+            "EVENTS: event_research.json and event_research_portfolios.csv, with historical pre-OOS findings only.\\n"
             "strategy.json: strategy and optimization metadata\n"
             "optimization_trials.csv: model and BTC/CASH policy candidates\n"
             "source_historical_audit.zip: immutable source data and labels\n"
