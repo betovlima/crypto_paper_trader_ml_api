@@ -226,7 +226,7 @@ def _portfolio(
         if i == lo and name == "BUY_HOLD":
             execute("BUY", opening, at, "BUY_AND_HOLD", i - 1)
         elif i > lo:
-            if btc > 0:
+            if btc > 0 and name != "BUY_HOLD":
                 phigh, plow = float(prev["high"]), float(prev["low"])
                 upper_hit, lower_hit = phigh >= target, plow <= stop
                 time_end = i - position_start >= bars
