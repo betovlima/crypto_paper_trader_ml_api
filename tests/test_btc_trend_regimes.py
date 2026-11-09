@@ -217,3 +217,16 @@ def test_market_gap_cancels_a_pending_order():
     for trade in result["actions"]:
         if trade["signal_at"]:
             assert pd.Timestamp(trade["timestamp"]) - pd.Timestamp(trade["signal_at"]) == pd.Timedelta(minutes=30)
+
+
+def test_rsi_strong_monotonic_rally_is_100_not_neutral_50():
+    ts = pd.date_range("2024-01-01", periods=48*20, freq="30min", tz="UTC")
+    prices = np.arange(len(ts), dtype=float) + 100.
+    source = pd.DataFrame({
+        "timestamp": ts, "open": prices, "close": prices,
+        "high": prices + .3, "low": prices - .3,
+        "volume": np.ones(len(ts)),
+    })
+    bars = completed_bars(source, source_seconds=1800,
+                          bar_seconds=4*3600, frequency="4h")
+    assert bars["rsi14"].iloc[-1] == 100
