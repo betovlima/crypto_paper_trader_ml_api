@@ -168,6 +168,11 @@ def test_one_click_api_stores_and_exports_event_research_without_oos(monkeypatch
                 assert "source_historical_audit.zip" in z.namelist()
                 assert "event_research.json" in z.namelist()
                 assert "event_research_portfolios.csv" in z.namelist()
+                assert "event_trade_actions.csv" in z.namelist()
+                trade_audit = z.read("event_trade_actions.csv").decode()
+                assert "fee_rate,fee_tier,fee_usd,slippage_usd" in trade_audit
+                assert "CUSUM_UP_BREAKOUT" in trade_audit
+                assert "BUY_HOLD" in trade_audit
                 summary = json.loads(z.read("event_research.json"))["summary"]
                 assert summary["oos_executed"] is False
                 assert summary["cash_baseline"]["validation"]["capital_final"] == 10000.0
