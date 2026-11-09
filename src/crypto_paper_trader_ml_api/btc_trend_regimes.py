@@ -1,8 +1,8 @@
-"""V14 capital-first BTC trend, breakout and volatility-regime research.
+"""V15 BTC causal technical-indicator research and conservative execution.
 
 Only complete UTC 4h, 1d and weekly bars are eligible. The original 30-minute
 archive is the sole price source. All decisions at completed higher-timeframe
-closes fill at the NEXT 30-minute OPEN, never at a retrospective extreme.
+closes fill at a later 30-minute OPEN, after a full additional source candle.
 No live orders, model training, future peeking, or intra-candle stop fills.
 """
 from __future__ import annotations
@@ -20,6 +20,7 @@ import pandas as pd
 
 from .alpaca_fees import ALPACA_FEE_MODEL, AlpacaFeeLedger
 from .btc_event_research import _build_data, _portfolio as benchmark_portfolio
+from .btc_directional_change import find_confirmed_extrema
 from .mexc import TIMEFRAME_SECONDS
 
 INITIAL_CAPITAL = 10000.0
@@ -30,7 +31,14 @@ POLICIES = (
     ("DUAL_4H_DAILY", "Tendência 4h com confirmação diária"),
     ("DAILY_VOL_REGIME", "Regimes diários com exposição 0%, 50% ou 100%"),
     ("WEEKLY_TREND_FILTER", "Tendência diária com filtro semanal"),
+    ("DAILY_EMA20_100", "EMA20/100 diária com histerese"),
+    ("DAILY_ADX_TREND", "Tendência diária confirmada por ADX e DI"),
+    ("DAILY_MACD_RSI", "MACD diário com faixa de RSI"),
+    ("FOUR_HOUR_BOLLINGER", "Rompimento Bollinger 4h com filtro diário"),
+    ("FOUR_HOUR_KELTNER", "Rompimento Keltner 4h com filtro diário"),
+    ("FOUR_HOUR_RSI_REVERSAL", "Recuperação RSI 4h com filtro de tendência"),
 )
+V14_POLICIES = POLICIES[:6]
 POLICY_NAMES = {code for code, _ in POLICIES}
 APPROVAL_RULES = {
     "development": "retorno líquido positivo e pelo menos uma compra e uma venda",
@@ -87,6 +95,9 @@ def completed_bars(frame: pd.DataFrame, *, source_seconds: int,
     result["sma20"] = close.rolling(20, min_periods=20).mean()
     result["sma50"] = close.rolling(50, min_periods=50).mean()
     result["sma100"] = close.rolling(100, min_periods=100).mean()
+    result["sma200"] = close.rolling(200, min_periods=200).mean()
+    for span in (20, 50, 100, 200):
+        result[f"ema{span}"] = close.ewm(span=span, adjust=False).mean()
     result["ema12"] = close.ewm(span=12, adjust=False).mean()
     result["ema26"] = close.ewm(span=26, adjust=False).mean()
     result["ema36"] = close.ewm(span=36, adjust=False).mean()
@@ -98,6 +109,37 @@ def completed_bars(frame: pd.DataFrame, *, source_seconds: int,
         (result["high"] - last).abs(), (result["low"] - last).abs()
     ], axis=1).max(axis=1)
     result["atr14"] = ranges.rolling(14, min_periods=14).mean()
+    delta = close.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    result["rsi14"] = (100 - 100/(1 + gain/loss.replace(0, np.nan))).fillna(50)
+    macd = result["ema12"] - result["ema26"]
+    result["macd"] = macd
+    result["macd_signal"] = macd.ewm(span=9, adjust=False).mean()
+    result["macd_hist"] = result["macd"] - result["macd_signal"]
+    up = result["high"].diff()
+    down = -result["low"].diff()
+    plus_dm = up.where((up > down) & (up > 0), 0.0)
+    minus_dm = down.where((down > up) & (down > 0), 0.0)
+    atr_w = ranges.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    plus_di = 100 * plus_dm.ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr_w.replace(0, np.nan)
+    minus_di = 100 * minus_dm.ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr_w.replace(0, np.nan)
+    result["di_plus"] = plus_di
+    result["di_minus"] = minus_di
+    dx = 100 * (plus_di-minus_di).abs() / (plus_di+minus_di).replace(0, np.nan)
+    result["adx14"] = dx.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    std20 = close.rolling(20, min_periods=20).std(ddof=0)
+    result["boll_upper"] = result["sma20"] + 2*std20
+    result["boll_lower"] = result["sma20"] - 2*std20
+    result["boll_width"] = 4*std20 / result["sma20"].replace(0, np.nan)
+    result["kelt_upper"] = result["ema20"] + 2*result["atr14"]
+    result["kelt_lower"] = result["ema20"] - 2*result["atr14"]
+    result["roc20"] = close/close.shift(20) - 1
+    lowest14 = result["low"].rolling(14, min_periods=14).min()
+    highest14 = result["high"].rolling(14, min_periods=14).max()
+    fast_k = (100*(close-lowest14)/(highest14-lowest14).replace(0, np.nan)).clip(0,100)
+    result["stoch_k"] = fast_k.rolling(3, min_periods=3).mean()
+    result["stoch_d"] = result["stoch_k"].rolling(3, min_periods=3).mean()
     returns = np.log(close / last)
     returns = returns.mask(result["end"].diff().dt.total_seconds() != bar_seconds)
     result["annual_vol30"] = returns.rolling(30, min_periods=30).std(ddof=0) * sqrt(365.25 * DAY_SECONDS / bar_seconds)
@@ -172,6 +214,54 @@ def _target(policy: str, frame: str, row, daily, weekly, current: float,
             return 1.0, "DAILY_AND_WEEKLY_UP"
         if close < row["sma50"] * .99 or weekly["ema12"] < weekly["ema26"] * .995:
             return 0.0, "DAILY_OR_WEEKLY_DOWN"
+        return current, "HYSTERESIS"
+    if policy == "DAILY_EMA20_100" and frame == "1d":
+        if row["streak"] < 105:
+            return current, "WARMUP"
+        if row["ema20"] > row["ema100"]*1.01 and close > row["ema20"]:
+            return 1.0, "EMA20_100_BULL"
+        if row["ema20"] < row["ema100"]*.99 or close < row["ema100"]*.99:
+            return 0.0, "EMA20_100_BEAR"
+        return current, "HYSTERESIS"
+    if policy == "DAILY_ADX_TREND" and frame == "1d":
+        if row["streak"] < 60 or not _positive(row["adx14"], row["di_plus"], row["di_minus"], row["sma50"]):
+            return current, "WARMUP"
+        if row["adx14"] >= 22 and row["di_plus"] > row["di_minus"]*1.1 and close > row["sma50"]*1.01:
+            return 1.0, "ADX_UPTREND"
+        if row["di_minus"] > row["di_plus"]*1.1 or close < row["sma50"]*.99:
+            return 0.0, "ADX_DOWNTREND"
+        return current, "HYSTERESIS"
+    if policy == "DAILY_MACD_RSI" and frame == "1d":
+        if row["streak"] < 60 or not _positive(row["sma50"]):
+            return current, "WARMUP"
+        if row["macd_hist"] > 0 and 45 <= row["rsi14"] <= 75 and close > row["sma50"]*1.005:
+            return 1.0, "MACD_RSI_ENTRY"
+        if row["macd_hist"] < 0 and row["rsi14"] < 48:
+            return 0.0, "MACD_RSI_EXIT"
+        return current, "HYSTERESIS"
+    if policy == "FOUR_HOUR_BOLLINGER" and frame == "4h":
+        if row["streak"] < 42 or daily is None or daily["streak"] < 55 or not _positive(daily["sma50"], row["boll_upper"], row["boll_lower"]):
+            return current, "WARMUP"
+        if close > row["boll_upper"] and daily["close"] > daily["sma50"]*1.005 and row["roc20"] > .01:
+            return 1.0, "BOLLINGER_BREAKOUT"
+        if close < row["sma20"]*.99 or daily["close"] < daily["sma50"]*.99:
+            return 0.0, "BOLLINGER_EXIT"
+        return current, "HOLD"
+    if policy == "FOUR_HOUR_KELTNER" and frame == "4h":
+        if row["streak"] < 42 or daily is None or daily["streak"] < 55 or not _positive(daily["sma50"], row["kelt_upper"], row["kelt_lower"]):
+            return current, "WARMUP"
+        if close > row["kelt_upper"] and daily["close"] > daily["sma50"]*1.005 and row["adx14"] >= 18:
+            return 1.0, "KELTNER_BREAKOUT"
+        if close < row["ema20"] - row["atr14"] or daily["close"] < daily["sma50"]*.99:
+            return 0.0, "KELTNER_EXIT"
+        return current, "HOLD"
+    if policy == "FOUR_HOUR_RSI_REVERSAL" and frame == "4h":
+        if row["streak"] < 42 or daily is None or daily["streak"] < 55 or not _positive(daily["sma50"]):
+            return current, "WARMUP"
+        if 45 < row["rsi14"] < 62 and row["roc20"] > 0 and daily["close"] > daily["sma50"]*1.01:
+            return 1.0, "RSI_RECOVERY"
+        if row["rsi14"] < 38 or daily["close"] < daily["sma50"]*.99:
+            return 0.0, "RSI_WEAKNESS"
         return current, "HYSTERESIS"
     return current, "NOT_EVALUATED"
 
