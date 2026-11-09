@@ -75,6 +75,8 @@ def _build_data(history: pd.DataFrame, *, bar_seconds: int) -> pd.DataFrame:
         at = row["timestamp"]
         if previous is not None and (at - previous).total_seconds() != bar_seconds:
             pos = neg = 0.0
+            previous = at
+            continue  # never interpret an unobserved gap as a tradable BTC event
         previous = at
         delta, threshold = float(row["log_return"]), float(row["event_threshold"])
         if not isfinite(delta) or not isfinite(threshold):
@@ -226,6 +228,7 @@ def _portfolio(
         if i == lo and name == "BUY_HOLD":
             execute("BUY", opening, at, "BUY_AND_HOLD", i - 1)
         elif i > lo:
+            sold_this_candle = False
             if btc > 0 and name != "BUY_HOLD":
                 phigh, plow = float(prev["high"]), float(prev["low"])
                 upper_hit, lower_hit = phigh >= target, plow <= stop
@@ -244,7 +247,9 @@ def _portfolio(
                     else:
                         reason = "VERTICAL_TIMEOUT_EXIT_NEXT_OPEN"
                     execute("SELL", opening, at, reason, i - 1)
-            if btc == 0 and name not in ("BUY_HOLD", "CASH") and i < hi - 1 and not gap:
+                    sold_this_candle = True
+            if (btc == 0 and not sold_this_candle and name not in ("BUY_HOLD", "CASH")
+                    and i < hi - 1 and not gap):
                 eligible, event_i = _eligible(df, i, name, bar_seconds)
                 sigma = float(df.at[event_i, "sigma"]) if eligible else float("nan")
                 if eligible and isfinite(sigma):
