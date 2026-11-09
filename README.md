@@ -1,5 +1,36 @@
 # Crypto Paper Trader ML API
 
+## BTC Technical Capital V13
+
+New `TECHNICAL` research mode compares six **predeclared** causal BTC/CASH
+policies from the existing immutable 30-minute Binance source audit:
+`DC_2PCT`, `EMA_9_SLOPE`, `EMA_9_21_CROSS`,
+`EMA_STOCH_14_3_3`, `DONCHIAN_ATR`, and
+`EMA_TRAILING_3PCT`.
+
+All indicators are computed from completed candles only. Decisions at a candle
+close fill at the **next contiguous open**. Close-based protective exits
+are not simulated intrabar stop orders. Timestamp gaps cancel pending signals,
+liquidate open positions at the next observed open and reset indicator readiness.
+Each trial reinvests a single USD-equivalent $10,000 account and charges Alpaca
+dynamic taker fees plus slippage.
+
+Existing V12-style temporal partitions are retained: development, 48-candle
+embargo, chronological pre-OOS validation. Candidate selection uses
+**development only**; validation results are not a second optimization
+target. CASH and BTC buy-and-hold are reported for the same partitions.
+Previous OOS history is intentionally not opened and must not be described as
+independent evidence.
+
+From the Front, create a strategy from an already archived BTC history, run
+`POST /v1/ml-strategies/{id}/optimize` with
+`{"mode":"TECHNICAL","trials":6,"auto_execute":false}`, and export
+`report.zip`. The archive contains `technical_research.json`,
+`technical_research_portfolios.csv`, `technical_research_trades.csv`,
+and the unchanged source historical audit. No local scripts, new downloads,
+environment flags or real brokerage orders are involved.
+
+
 Independent API for long-period LightGBM walk-forward backtests. It is separate from the paper-trading API and never sends real orders.
 
 ## BTC Directional Change V12: retrospective BTC highs/lows and confirmed reversals
