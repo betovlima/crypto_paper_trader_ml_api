@@ -41,7 +41,7 @@ APPROVAL_RULES = {
     "selection": "uma única política selecionada pelo desenvolvimento, antes da validação",
 }
 TARGET_ANNUAL_VOL = .30
-REBAlANCE_MIN_CHANGE = .40
+REBALANCE_MIN_CHANGE = .40
 FOUR_HOUR_SECONDS = 4 * 3600
 DAY_SECONDS = 86400
 WEEK_SECONDS = 7 * DAY_SECONDS
@@ -57,7 +57,7 @@ def completed_bars(frame: pd.DataFrame, *, source_seconds: int,
     source["end"] = pd.to_datetime(source["timestamp"], utc=True) + pd.Timedelta(seconds=source_seconds)
     records = []
     for end, group in source.groupby(pd.Grouper(key="end", freq=frequency,
-                                                closed="right", label="right")):
+                                                closed="right", label="right", origin="epoch")):
         if len(group) != expected:
             continue
         ordered = group.sort_values("timestamp")
@@ -186,7 +186,7 @@ def build_decision_map(frame: pd.DataFrame, source_seconds: int) -> dict:
         "1d": completed_bars(frame, source_seconds=source_seconds,
                              bar_seconds=DAY_SECONDS, frequency="1D"),
         "1w": completed_bars(frame, source_seconds=source_seconds,
-                             bar_seconds=WEEK_SECONDS, frequency="W-SUN"),
+                             bar_seconds=WEEK_SECONDS, frequency="7D"),
     }
     daily, weekly = aggregates["1d"], aggregates["1w"]
     day_ends = list(daily["end"])
