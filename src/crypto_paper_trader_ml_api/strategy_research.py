@@ -1151,8 +1151,8 @@ def export_strategy_report(strategy_id: str) -> bytes:
                     ])
             z.writestr("event_research_portfolios.csv", event_csv.getvalue())
         z.writestr("README.txt", (
-            "BTC/CASH audited research: LightGBM or BTC-specific CUSUM event study.\\n"
-            "EVENTS: event_research.json and event_research_portfolios.csv, with historical pre-OOS findings only.\\n"
+            "BTC/CASH audited research: LightGBM or BTC-specific CUSUM event study.\n"
+            "EVENTS: event_research.json, event_research_portfolios.csv and event_trade_actions.csv.\n"
             "strategy.json: strategy and optimization metadata\n"
             "optimization_trials.csv: model and BTC/CASH policy candidates\n"
             "source_historical_audit.zip: immutable source data and labels\n"
@@ -1166,6 +1166,26 @@ def export_strategy_report(strategy_id: str) -> bytes:
             source = session.get(MLBacktestAudit, strategy["source_job_id"])
             if source is not None:
                 z.writestr("source_historical_audit.zip", source.archive_zip)
+                if strategy["mode"] == "EVENTS":
+                    full_replay = evaluate_archived_event_research(
+                        source.archive_zip, include_trades=True,
+                    )
+                    if full_replay["trials"] != strategy["trials"]:
+                        raise ValueError("Auditoria histórica de eventos diverge da pesquisa persistida")
+                    trades_csv = StringIO()
+                    trade_writer = csv.writer(trades_csv)
+                    trade_writer.writerow([
+                        "policy", "partition", "timestamp", "action", "reason",
+                        "signal_candle_index", "price", "fee_rate", "fee_tier",
+                        "fee_usd", "slippage_usd", "capital_after",
+                    ])
+                    for trade in full_replay["event_trades"]:
+                        trade_writer.writerow([trade.get(key) for key in (
+                            "policy", "partition", "timestamp", "action", "reason",
+                            "signal_candle_index", "price", "fee_rate", "fee_tier",
+                            "fee_usd", "slippage_usd", "capital_after",
+                        )])
+                    z.writestr("event_trade_actions.csv", trades_csv.getvalue())
 
             job = session.get(MLBacktestJob, strategy["execution_job_id"]) if strategy["execution_job_id"] else None
             audit = session.get(MLBacktestAudit, job.id) if job and job.status == "COMPLETED" else None
