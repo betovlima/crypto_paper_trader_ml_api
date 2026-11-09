@@ -41,7 +41,7 @@ def _event_candles(size=2700):
 def _event_archive(*, post_oos_mutation=False, size=2700):
     original = _make_archive()
     candle = _event_candles(size)
-    first_oos = candle["timestamp"].iloc[2100]
+    first_oos = candle["timestamp"].iloc[min(2100, size - 100)]
     if post_oos_mutation:
         mask = candle["timestamp"] >= first_oos
         candle.loc[mask, "high"] *= 5
