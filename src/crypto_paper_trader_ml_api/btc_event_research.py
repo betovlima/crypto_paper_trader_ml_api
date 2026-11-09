@@ -60,6 +60,9 @@ def _build_data(history: pd.DataFrame, *, bar_seconds: int) -> pd.DataFrame:
     fast_bars = max(48, ceil(24 * 3600 / bar_seconds))
     slow_bars = fast_bars * 7
     ret = np.log(df["close"] / df["close"].shift())
+    # A return spanning missing BTC candles is not a genuine observed bar.
+    gap_mask = df["timestamp"].diff().dt.total_seconds().ne(bar_seconds)
+    ret = ret.mask(gap_mask)
     df["log_return"] = ret
     df["sigma"] = ret.rolling(fast_bars, min_periods=fast_bars).std(ddof=0)
     df["sigma_slow"] = ret.rolling(slow_bars, min_periods=slow_bars).std(ddof=0)
@@ -160,6 +163,7 @@ def _eligible(df: pd.DataFrame, idx: int, name: str, seconds: int) -> tuple[bool
 def _portfolio(
     df: pd.DataFrame, lo: int, hi: int, name: str, *,
     fee_rate: float, slippage: float, bar_seconds: int,
+    audit_limit: int | None = 80,
 ) -> dict:
     """One BTC/CASH account, full reinvestment; no intrabar imagined fills."""
     cash, btc = INITIAL_CAPITAL, 0.0
@@ -296,14 +300,14 @@ def _portfolio(
         "segment_returns": blocks,
         "start": df.at[lo, "timestamp"].isoformat(),
         "end": df.at[hi - 1, "timestamp"].isoformat(),
-        "actions": actions[:80],
+        "actions": actions if audit_limit is None else actions[:audit_limit],
         "action_count": len(actions),
-        "actions_truncated": len(actions) > 80,
+        "actions_truncated": audit_limit is not None and len(actions) > audit_limit,
         "execution_rule": "Confirmed close signal; next-bar open buy/sell; forced final close liquidation",
     }
 
 
-def evaluate_archived_event_research(source_archive: bytes) -> dict:
+def evaluate_archived_event_research(source_archive: bytes, *, include_trades: bool = False) -> dict:
     """Pre-OOS discovery with frozen BTC rules and a separate validation window."""
     from .archive_replay import inspect_source_archive
     request, _ = inspect_source_archive(source_archive)
@@ -405,7 +409,34 @@ def evaluate_archived_event_research(source_archive: bytes) -> dict:
         else "NO_RELIABLE_EDGE_IDENTIFIED"
     )
     gap_count = int((df["timestamp"].diff().dt.total_seconds().iloc[1:] != seconds).sum())
+    detailed_trades = []
+    if include_trades:
+        for name, _ in POLICIES:
+            for part, (start, end) in (("development", development), ("validation", holdout)):
+                replay = _portfolio(
+                    df, start, end, name,
+                    fee_rate=request.fee_rate,
+                    slippage=request.slippage_rate,
+                    bar_seconds=seconds, audit_limit=None,
+                )
+                if replay["actions_truncated"]:
+                    raise ValueError("Auditoria de operações BTC incompleta")
+                detailed_trades.extend({
+                    "policy": name, "partition": part, **action,
+                } for action in replay["actions"])
+        for baseline in ("BUY_HOLD",):
+            for part, (start, end) in (("development", development), ("validation", holdout)):
+                replay = _portfolio(
+                    df, start, end, baseline,
+                    fee_rate=request.fee_rate,
+                    slippage=request.slippage_rate,
+                    bar_seconds=seconds, audit_limit=None,
+                )
+                detailed_trades.extend({
+                    "policy": baseline, "partition": part, **action,
+                } for action in replay["actions"])
     return {
+        "event_trades": detailed_trades,
         "trials": trials,
         "summary": {
             "experiment": "BTC_CUSUM_TRIPLE_BARRIER_FIXED_BASELINES_V11",
