@@ -382,6 +382,24 @@ def evaluate_archived_directional_change(
     period_gap_count = int(
         (df["timestamp"].diff().dt.total_seconds().iloc[1:] != seconds).sum()
     )
+    # Compact validation price chart: retrospective pivots are distinguished
+    # from confirmations; nothing after the immutable first OOS is included.
+    trace_start = max(validation[0], validation[1] - ceil(35 * 86400 / seconds))
+    trace_stride = max(1, ceil((validation[1] - trace_start) / 220))
+    chart_prices = [
+        {"timestamp": df.at[i, "timestamp"].isoformat(),
+         "close": float(df.at[i, "close"])}
+        for i in range(trace_start, validation[1], trace_stride)
+    ]
+    if not chart_prices or chart_prices[-1]["timestamp"] != df.at[validation[1] - 1, "timestamp"].isoformat():
+        chart_prices.append({
+            "timestamp": df.at[validation[1] - 1, "timestamp"].isoformat(),
+            "close": float(df.at[validation[1] - 1, "close"]),
+        })
+    chart_pivots = [
+        e for e in find_confirmed_extrema(df, *validation, .02, seconds)
+        if e["pivot_index"] >= trace_start
+    ][-80:]
     summary = {
         "experiment": "BTC_DIRECTIONAL_CHANGE_EXTREMA_V12",
         "result_status": (
@@ -409,6 +427,7 @@ def evaluate_archived_directional_change(
         "initial_capital_usd_equivalent": CAPITAL,
         "extreme_definition": "Topos/fundos locais pelo CLOSE; confirmação após reversão. Máximas/mínimas absolutas pelas HIGH/LOW apenas descritivas.",
         "threshold_rules": "1%, 2%, 3% ou vol24h*1.2 com limites 1%-4%, congelada no pivô",
+        "chart_2pct": {"prices": chart_prices, "extrema": chart_pivots},
         "order_rule": "Confirma no fechamento do candle; executa no próximo OPEN contínuo",
         "absolute_ohlc_development": _absolute_ohlc_extrema(df, *development),
         "absolute_ohlc_validation": _absolute_ohlc_extrema(df, *validation),
