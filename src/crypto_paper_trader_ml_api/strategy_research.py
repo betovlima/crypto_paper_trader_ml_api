@@ -760,6 +760,11 @@ def _run_event_research(strategy_id: str) -> None:
         elif research_mode == "INDICATOR_LAB":
             experiment = evaluate_archived_trend_regimes(archive)
             candidate_count = len(BTC_INDICATOR_POLICIES)
+        elif research_mode == "EXPOSURE_RESEARCH":
+            experiment = evaluate_archived_trend_regimes(
+                archive, require_development_edge=True,
+            )
+            candidate_count = len(BTC_INDICATOR_POLICIES)
         else:
             experiment = evaluate_archived_event_research(archive)
             candidate_count = len(BTC_EVENT_POLICIES)
@@ -1046,7 +1051,7 @@ def _run_optimization(strategy_id: str) -> None:
 
 
 def start_optimization(strategy_id: str, *, mode: str, trials: int, auto_execute: bool = False) -> dict:
-    if mode not in {"QUICK", "BAYESIAN", "EVENTS", "DIRECTIONAL_CHANGE", "TECHNICAL", "TREND_REGIMES", "INDICATOR_LAB"}:
+    if mode not in {"QUICK", "BAYESIAN", "EVENTS", "DIRECTIONAL_CHANGE", "TECHNICAL", "TREND_REGIMES", "INDICATOR_LAB", "EXPOSURE_RESEARCH"}:
         raise ValueError("Modo de otimização inválido")
     if mode == "EVENTS" and trials != len(BTC_EVENT_POLICIES):
         raise ValueError("A pesquisa por eventos usa quatro políticas pré-definidas")
@@ -1058,6 +1063,8 @@ def start_optimization(strategy_id: str, *, mode: str, trials: int, auto_execute
         raise ValueError("Tendência e regimes exigem seis hipóteses pré-definidas")
     if mode == "INDICATOR_LAB" and trials != len(BTC_INDICATOR_POLICIES):
         raise ValueError("V15 exige doze hipóteses técnicas pré-definidas")
+    if mode == "EXPOSURE_RESEARCH" and trials != len(BTC_INDICATOR_POLICIES):
+        raise ValueError("V16 exige doze hipóteses fixas e o filtro do Buy and Hold no desenvolvimento")
     if not 4 <= trials <= MAX_TRIALS:
         raise ValueError("Quantidade de tentativas fora dos limites")
     with SessionLocal.begin() as session:
@@ -1081,7 +1088,7 @@ def start_optimization(strategy_id: str, *, mode: str, trials: int, auto_execute
     from .service import _get_executor
     from .settings_service import get_runtime_parameters
     _get_executor(get_runtime_parameters()).submit(
-        _run_event_research if mode in {"EVENTS", "DIRECTIONAL_CHANGE", "TECHNICAL", "TREND_REGIMES", "INDICATOR_LAB"} else _run_optimization,
+        _run_event_research if mode in {"EVENTS", "DIRECTIONAL_CHANGE", "TECHNICAL", "TREND_REGIMES", "INDICATOR_LAB", "EXPOSURE_RESEARCH"} else _run_optimization,
         strategy_id,
     )
     return get_strategy(strategy_id)
@@ -1202,7 +1209,7 @@ def export_strategy_report(strategy_id: str) -> bytes:
                         m.get("slippage_usd_estimate"),
                     ])
             z.writestr("directional_change_portfolios.csv", dc_csv.getvalue())
-        if strategy["mode"] in {"TREND_REGIMES", "INDICATOR_LAB"}:
+        if strategy["mode"] in {"TREND_REGIMES", "INDICATOR_LAB", "EXPOSURE_RESEARCH"}:
             z.writestr("trend_regimes.json", json.dumps({
                 "summary": strategy["summary"], "trials": strategy["trials"],
             }, ensure_ascii=False, indent=2, allow_nan=False))
@@ -1227,7 +1234,27 @@ def export_strategy_report(strategy_id: str) -> bytes:
                         json.dumps(trial["metrics"]["quality_checks"], ensure_ascii=False),
                     ])
             z.writestr("trend_regimes_portfolios.csv", report_csv.getvalue())
-            if strategy["mode"] == "INDICATOR_LAB":
+            if strategy["mode"] == "EXPOSURE_RESEARCH":
+                exposure_csv = StringIO()
+                exposure_writer = csv.writer(exposure_csv)
+                columns = ["policy", "period", "capital_vs_buy_hold_usd", "development_eligible",
+                           "fully_cash_hours", "full_cash_candles",
+                           "partially_invested_candles", "missed_upside_share",
+                           "avoided_downside_share", "positive_candles_fully_in_cash",
+                           "unexposed_positive_open_close_log_return",
+                           "unexposed_negative_open_close_log_return_magnitude",
+                           "method"]
+                exposure_writer.writerow(columns)
+                for row in strategy["summary"].get("exposure_diagnostics", []):
+                    for period in ("development", "validation"):
+                        metrics = row[period]
+                        gap_key = period + "_vs_buy_hold_usd"
+                        exposure_writer.writerow([
+                            row["policy"], period, row[gap_key], row["development_eligible"],
+                            *[metrics.get(key) for key in columns[4:]]
+                        ])
+                z.writestr("exposure_diagnostics.csv", exposure_csv.getvalue())
+            if strategy["mode"] in {"INDICATOR_LAB", "EXPOSURE_RESEARCH"}:
                 chart = strategy["summary"].get("chart") or {}
                 markers_csv = StringIO()
                 marker_writer = csv.writer(markers_csv)
@@ -1278,6 +1305,7 @@ def export_strategy_report(strategy_id: str) -> bytes:
             "TECHNICAL: technical_research.json, _portfolios.csv, _trades.csv.\\n"
             "TREND_REGIMES: trend_regimes.json, _portfolios.csv, _trades.csv.\\n"
             "INDICATOR_LAB: trend_regimes.json, _portfolios.csv, _trades.csv, indicator_lab_markers.csv.\\n"
+            "EXPOSURE_RESEARCH: same files plus exposure_diagnostics.csv.\\n"
             "strategy.json: strategy and optimization metadata\n"
             "optimization_trials.csv: model and BTC/CASH policy candidates\n"
             "source_historical_audit.zip: immutable source data and labels\n"
@@ -1312,10 +1340,11 @@ def export_strategy_report(strategy_id: str) -> bytes:
                         )])
                     z.writestr("event_trade_actions.csv", trades_csv.getvalue())
 
-                if strategy["mode"] in {"TREND_REGIMES", "INDICATOR_LAB"}:
+                if strategy["mode"] in {"TREND_REGIMES", "INDICATOR_LAB", "EXPOSURE_RESEARCH"}:
                     research = evaluate_archived_trend_regimes(
                         source.archive_zip, include_details=True,
                         policy_set=BTC_TREND_POLICIES if strategy["mode"] == "TREND_REGIMES" else None,
+                        require_development_edge=strategy["mode"] == "EXPOSURE_RESEARCH",
                     )
                     if research["trials"] != strategy["trials"]:
                         raise ValueError("Auditoria de tendências diverge da execução persistida")
