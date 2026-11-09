@@ -550,11 +550,11 @@ def evaluate_archived_trend_regimes(source_archive: bytes, *,
     approved_policy = chosen["parameters"]["policy"] if approved else None
     trace_start = max(periods["validation"][0], len(frame)-ceil(35*DAY_SECONDS/source_seconds))
     stride = max(1, ceil((len(frame)-trace_start)/220))
-    prices = [{"timestamp": frame.at[i, "timestamp"].isoformat(),
+    prices = [{"timestamp": (frame.at[i, "timestamp"] + timedelta(seconds=source_seconds)).isoformat(),
                "close": float(frame.at[i, "close"])}
               for i in range(trace_start, len(frame), stride)]
-    if prices and prices[-1]["timestamp"] != frame.at[len(frame)-1, "timestamp"].isoformat():
-        prices.append({"timestamp": frame.at[len(frame)-1, "timestamp"].isoformat(),
+    if prices and prices[-1]["timestamp"] != (frame.at[len(frame)-1, "timestamp"] + timedelta(seconds=source_seconds)).isoformat():
+        prices.append({"timestamp": (frame.at[len(frame)-1, "timestamp"] + timedelta(seconds=source_seconds)).isoformat(),
                        "close": float(frame.at[len(frame)-1, "close"])})
     # Diagnostic chart is never a strategy promotion. The development-selected
     # policy is displayed even if rejected, while the ACTIVE selector stays empty.
@@ -577,7 +577,7 @@ def evaluate_archived_trend_regimes(source_archive: bytes, *,
     extrema = find_confirmed_extrema(frame, trace_start, len(frame), .02, source_seconds)
     inflections = [{
         "kind": "BOTTOM" if e["kind"] == "BOTTOM_CONFIRMED" else "TOP",
-        "pivot_timestamp": e["pivot_timestamp"],
+        "pivot_timestamp": (pd.Timestamp(e["pivot_timestamp"]) + timedelta(seconds=source_seconds)).isoformat(),
         "pivot_close": e["pivot_close"],
         "confirmed_at": (pd.Timestamp(e["confirmed_at"]) +
                          timedelta(seconds=source_seconds)).isoformat(),
