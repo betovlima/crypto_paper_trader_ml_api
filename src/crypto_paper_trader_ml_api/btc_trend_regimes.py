@@ -462,7 +462,8 @@ def simulate_policy(frame: pd.DataFrame, lo: int, hi: int, policy: str, *,
 
 
 def evaluate_archived_trend_regimes(source_archive: bytes, *,
-                                    include_details: bool = False) -> dict:
+                                    include_details: bool = False,
+                                    policy_set: tuple | None = None) -> dict:
     from .archive_replay import inspect_source_archive
 
     request, _ = inspect_source_archive(source_archive)
@@ -505,8 +506,9 @@ def evaluate_archived_trend_regimes(source_archive: bytes, *,
             r.pop("actions", None)
             baseline[code][part] = r
 
+    hypotheses = POLICIES if policy_set is None else policy_set
     results, all_actions = [], []
-    for idx, (policy, label) in enumerate(POLICIES, 1):
+    for idx, (policy, label) in enumerate(hypotheses, 1):
         part_metrics = {}
         for part, (lo, hi) in periods.items():
             result = simulate_policy(
@@ -554,19 +556,41 @@ def evaluate_archived_trend_regimes(source_archive: bytes, *,
     if prices and prices[-1]["timestamp"] != frame.at[len(frame)-1, "timestamp"].isoformat():
         prices.append({"timestamp": frame.at[len(frame)-1, "timestamp"].isoformat(),
                        "close": float(frame.at[len(frame)-1, "close"])})
+    # Diagnostic chart is never a strategy promotion. The development-selected
+    # policy is displayed even if rejected, while the ACTIVE selector stays empty.
+    chart_policy = chosen["parameters"]["policy"] if chosen else None
     chart_actions = []
-    if approved_policy:
-        replay = simulate_policy(frame, *periods["validation"], approved_policy,
+    chart_signals = []
+    if chart_policy:
+        replay = simulate_policy(frame, *periods["validation"], chart_policy,
                                  source_seconds=source_seconds,
                                  slippage=float(request.slippage_rate),
                                  decision_map=decision_map, include_actions=True)
         chart_actions = [a for a in replay["actions"] if a["execution_candle_index"] >= trace_start]
+        chart_signals = [{
+            "action": a["action"], "timestamp": a["signal_at"],
+            "price": a["signal_price"], "reason": a["reason"],
+            "execution_at": a["timestamp"],
+        } for a in chart_actions if a.get("signal_at")]
+    # Historical turning points are descriptive only; confirmation arrives
+    # AFTER the pivot, and neither pivot nor confirmation is an implicit trade.
+    extrema = find_confirmed_extrema(frame, trace_start, len(frame), .02, source_seconds)
+    inflections = [{
+        "kind": "BOTTOM" if e["kind"] == "BOTTOM_CONFIRMED" else "TOP",
+        "pivot_timestamp": e["pivot_timestamp"],
+        "pivot_close": e["pivot_close"],
+        "confirmed_at": (pd.Timestamp(e["confirmed_at"]) +
+                         timedelta(seconds=source_seconds)).isoformat(),
+        "confirmed_close": e["confirmed_close"],
+        "lag_candles": e["lag_candles"],
+        "threshold_fraction": e["threshold_fraction"],
+    } for e in extrema]
     summary = {
-        "experiment": "BTC_TREND_REGIMES_V14",
+        "experiment": "BTC_INDICATOR_LAB_V15" if len(hypotheses) > 6 else "BTC_TREND_REGIMES_V14_DELAYED",
         "result_status": "PRE_OOS_APPROVED_NEEDS_FRESH_DATA" if approved else "NO_STRATEGY_APPROVED",
         "approval_rules": APPROVAL_RULES,
-        "candidate_count": len(POLICIES),
-        "rejected_count": len(POLICIES)-(1 if approved else 0),
+        "candidate_count": len(hypotheses),
+        "rejected_count": len(hypotheses)-(1 if approved else 0),
         "approved_policies": [approved_policy] if approved else [],
         "chosen_only_on_development": chosen["parameters"]["policy"] if chosen else None,
         "chosen_validation": chosen["metrics"] if chosen else None,
@@ -588,13 +612,20 @@ def evaluate_archived_trend_regimes(source_archive: bytes, *,
         "fee_model": ALPACA_FEE_MODEL, "slippage_rate": float(request.slippage_rate),
         "initial_capital_usd_equivalent": INITIAL_CAPITAL,
         "buy_hold_baseline": baseline["BUY_HOLD"], "cash_baseline": baseline["CASH"],
-        "chart": {"prices": prices, "actions": chart_actions},
+        "chart": {"prices": prices, "actions": chart_actions, "signals": chart_signals,
+                  "inflections": inflections, "diagnostic_policy": chart_policy,
+                  "diagnostic_only": not approved, "inflexion_threshold": .02},
+        "indicator_catalog": ["SMA20/50/100/200", "EMA12/20/26/36/50/100/200",
+                              "RSI14", "MACD_12_26_9", "ADX14", "DI_PLUS", "DI_MINUS",
+                              "BOLLINGER20_2", "KELTNER20_2ATR", "ATR14", "ROC20",
+                              "STOCHASTIC14_3_3", "DONCHIAN20", "ANNUALIZED_VOL30"],
+        "conservative_fill_delay_minutes": 30,
         "oos_executed": False, "live_orders_enabled": False,
         "research_warning": (
             "Pesquisa PRE-OOS: nem a seleção nem a validação constituem teste independente inédito. "
             "Candles 4h/diários/semanais só entram após fechamento completo. "
-            "Ordens e stops executados na abertura seguinte de 30m, ou fechamento final; "
-            "não existe preenchimento intrabar garantido. BTCUSDT é proxy para Alpaca BTCUSD. "
+            "Ordens e stops simulados na abertura 30 minutos DEPOIS da confirmação, "
+            "sem garantia intrabar; a última liquidação da janela é sintética. BTCUSDT representa proxy Alpaca BTCUSD. "
             "Carteiras e fees usam preços históricos e slippage simulado."
         ),
     }
