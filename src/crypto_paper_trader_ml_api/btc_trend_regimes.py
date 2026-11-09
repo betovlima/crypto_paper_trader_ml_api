@@ -1,8 +1,8 @@
-"""V14 capital-first BTC trend, breakout and volatility-regime research.
+"""V15 BTC causal technical-indicator research and conservative execution.
 
 Only complete UTC 4h, 1d and weekly bars are eligible. The original 30-minute
 archive is the sole price source. All decisions at completed higher-timeframe
-closes fill at the NEXT 30-minute OPEN, never at a retrospective extreme.
+closes fill at a later 30-minute OPEN, after a full additional source candle.
 No live orders, model training, future peeking, or intra-candle stop fills.
 """
 from __future__ import annotations
@@ -20,6 +20,7 @@ import pandas as pd
 
 from .alpaca_fees import ALPACA_FEE_MODEL, AlpacaFeeLedger
 from .btc_event_research import _build_data, _portfolio as benchmark_portfolio
+from .btc_directional_change import find_confirmed_extrema
 from .mexc import TIMEFRAME_SECONDS
 
 INITIAL_CAPITAL = 10000.0
@@ -30,7 +31,14 @@ POLICIES = (
     ("DUAL_4H_DAILY", "Tendência 4h com confirmação diária"),
     ("DAILY_VOL_REGIME", "Regimes diários com exposição 0%, 50% ou 100%"),
     ("WEEKLY_TREND_FILTER", "Tendência diária com filtro semanal"),
+    ("DAILY_EMA20_100", "EMA20/100 diária com histerese"),
+    ("DAILY_ADX_TREND", "Tendência diária confirmada por ADX e DI"),
+    ("DAILY_MACD_RSI", "MACD diário com faixa de RSI"),
+    ("FOUR_HOUR_BOLLINGER", "Rompimento Bollinger 4h com filtro diário"),
+    ("FOUR_HOUR_KELTNER", "Rompimento Keltner 4h com filtro diário"),
+    ("FOUR_HOUR_RSI_REVERSAL", "Recuperação RSI 4h com filtro de tendência"),
 )
+V14_POLICIES = POLICIES[:6]
 POLICY_NAMES = {code for code, _ in POLICIES}
 APPROVAL_RULES = {
     "development": "retorno líquido positivo e pelo menos uma compra e uma venda",
@@ -87,6 +95,9 @@ def completed_bars(frame: pd.DataFrame, *, source_seconds: int,
     result["sma20"] = close.rolling(20, min_periods=20).mean()
     result["sma50"] = close.rolling(50, min_periods=50).mean()
     result["sma100"] = close.rolling(100, min_periods=100).mean()
+    result["sma200"] = close.rolling(200, min_periods=200).mean()
+    for span in (20, 50, 100, 200):
+        result[f"ema{span}"] = close.ewm(span=span, adjust=False).mean()
     result["ema12"] = close.ewm(span=12, adjust=False).mean()
     result["ema26"] = close.ewm(span=26, adjust=False).mean()
     result["ema36"] = close.ewm(span=36, adjust=False).mean()
@@ -98,6 +109,41 @@ def completed_bars(frame: pd.DataFrame, *, source_seconds: int,
         (result["high"] - last).abs(), (result["low"] - last).abs()
     ], axis=1).max(axis=1)
     result["atr14"] = ranges.rolling(14, min_periods=14).mean()
+    delta = close.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    # RSI = 100 after a one-sided rally (zero average losses), 50 when
+    # both average gains and losses are zero; never silently map rallies to 50.
+    rsi = 100 - 100/(1 + gain/loss.replace(0, np.nan))
+    rsi = rsi.mask((loss == 0) & (gain > 0), 100)
+    result["rsi14"] = rsi.mask((loss == 0) & (gain == 0), 50)
+    macd = result["ema12"] - result["ema26"]
+    result["macd"] = macd
+    result["macd_signal"] = macd.ewm(span=9, adjust=False).mean()
+    result["macd_hist"] = result["macd"] - result["macd_signal"]
+    up = result["high"].diff()
+    down = -result["low"].diff()
+    plus_dm = up.where((up > down) & (up > 0), 0.0)
+    minus_dm = down.where((down > up) & (down > 0), 0.0)
+    atr_w = ranges.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    plus_di = 100 * plus_dm.ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr_w.replace(0, np.nan)
+    minus_di = 100 * minus_dm.ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr_w.replace(0, np.nan)
+    result["di_plus"] = plus_di
+    result["di_minus"] = minus_di
+    dx = 100 * (plus_di-minus_di).abs() / (plus_di+minus_di).replace(0, np.nan)
+    result["adx14"] = dx.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    std20 = close.rolling(20, min_periods=20).std(ddof=0)
+    result["boll_upper"] = result["sma20"] + 2*std20
+    result["boll_lower"] = result["sma20"] - 2*std20
+    result["boll_width"] = 4*std20 / result["sma20"].replace(0, np.nan)
+    result["kelt_upper"] = result["ema20"] + 2*result["atr14"]
+    result["kelt_lower"] = result["ema20"] - 2*result["atr14"]
+    result["roc20"] = close/close.shift(20) - 1
+    lowest14 = result["low"].rolling(14, min_periods=14).min()
+    highest14 = result["high"].rolling(14, min_periods=14).max()
+    fast_k = (100*(close-lowest14)/(highest14-lowest14).replace(0, np.nan)).clip(0,100)
+    result["stoch_k"] = fast_k.rolling(3, min_periods=3).mean()
+    result["stoch_d"] = result["stoch_k"].rolling(3, min_periods=3).mean()
     returns = np.log(close / last)
     returns = returns.mask(result["end"].diff().dt.total_seconds() != bar_seconds)
     result["annual_vol30"] = returns.rolling(30, min_periods=30).std(ddof=0) * sqrt(365.25 * DAY_SECONDS / bar_seconds)
@@ -173,6 +219,54 @@ def _target(policy: str, frame: str, row, daily, weekly, current: float,
         if close < row["sma50"] * .99 or weekly["ema12"] < weekly["ema26"] * .995:
             return 0.0, "DAILY_OR_WEEKLY_DOWN"
         return current, "HYSTERESIS"
+    if policy == "DAILY_EMA20_100" and frame == "1d":
+        if row["streak"] < 105:
+            return current, "WARMUP"
+        if row["ema20"] > row["ema100"]*1.01 and close > row["ema20"]:
+            return 1.0, "EMA20_100_BULL"
+        if row["ema20"] < row["ema100"]*.99 or close < row["ema100"]*.99:
+            return 0.0, "EMA20_100_BEAR"
+        return current, "HYSTERESIS"
+    if policy == "DAILY_ADX_TREND" and frame == "1d":
+        if row["streak"] < 60 or not _positive(row["adx14"], row["di_plus"], row["di_minus"], row["sma50"]):
+            return current, "WARMUP"
+        if row["adx14"] >= 22 and row["di_plus"] > row["di_minus"]*1.1 and close > row["sma50"]*1.01:
+            return 1.0, "ADX_UPTREND"
+        if row["di_minus"] > row["di_plus"]*1.1 or close < row["sma50"]*.99:
+            return 0.0, "ADX_DOWNTREND"
+        return current, "HYSTERESIS"
+    if policy == "DAILY_MACD_RSI" and frame == "1d":
+        if row["streak"] < 60 or not _positive(row["sma50"]):
+            return current, "WARMUP"
+        if row["macd_hist"] > 0 and 45 <= row["rsi14"] <= 75 and close > row["sma50"]*1.005:
+            return 1.0, "MACD_RSI_ENTRY"
+        if row["macd_hist"] < 0 and row["rsi14"] < 48:
+            return 0.0, "MACD_RSI_EXIT"
+        return current, "HYSTERESIS"
+    if policy == "FOUR_HOUR_BOLLINGER" and frame == "4h":
+        if row["streak"] < 42 or daily is None or daily["streak"] < 55 or not _positive(daily["sma50"], row["boll_upper"], row["boll_lower"]):
+            return current, "WARMUP"
+        if close > row["boll_upper"] and daily["close"] > daily["sma50"]*1.005 and row["roc20"] > .01:
+            return 1.0, "BOLLINGER_BREAKOUT"
+        if close < row["sma20"]*.99 or daily["close"] < daily["sma50"]*.99:
+            return 0.0, "BOLLINGER_EXIT"
+        return current, "HOLD"
+    if policy == "FOUR_HOUR_KELTNER" and frame == "4h":
+        if row["streak"] < 42 or daily is None or daily["streak"] < 55 or not _positive(daily["sma50"], row["kelt_upper"], row["kelt_lower"]):
+            return current, "WARMUP"
+        if close > row["kelt_upper"] and daily["close"] > daily["sma50"]*1.005 and row["adx14"] >= 18:
+            return 1.0, "KELTNER_BREAKOUT"
+        if close < row["ema20"] - row["atr14"] or daily["close"] < daily["sma50"]*.99:
+            return 0.0, "KELTNER_EXIT"
+        return current, "HOLD"
+    if policy == "FOUR_HOUR_RSI_REVERSAL" and frame == "4h":
+        if row["streak"] < 42 or daily is None or daily["streak"] < 55 or not _positive(daily["sma50"]):
+            return current, "WARMUP"
+        if 45 < row["rsi14"] < 62 and row["roc20"] > 0 and daily["close"] > daily["sma50"]*1.01:
+            return 1.0, "RSI_RECOVERY"
+        if row["rsi14"] < 38 or daily["close"] < daily["sma50"]*.99:
+            return 0.0, "RSI_WEAKNESS"
+        return current, "HYSTERESIS"
     return current, "NOT_EVALUATED"
 
 
@@ -220,10 +314,11 @@ def simulate_policy(frame: pd.DataFrame, lo: int, hi: int, policy: str, *,
     last_trade_index, last_exit_index = -100000, -100000
     actions, equity = [], []
     previous_at = None
+    pending = None
     min_hold_bars = 48 if policy not in ("WEEKLY_TREND_FILTER",) else 7 * 48
 
     def trade(target: float, price: float, at: pd.Timestamp, index: int,
-              reason: str, signal_at: str | None) -> None:
+              reason: str, signal_at: str | None, signal_price: float | None = None) -> None:
         nonlocal cash, units, fees, slip_paid, buy_count, sell_count
         nonlocal last_target, peak_close, last_trade_index, last_exit_index, complete_exits
         current_value = cash + units * price
@@ -269,6 +364,7 @@ def simulate_policy(frame: pd.DataFrame, lo: int, hi: int, policy: str, *,
             actions.append({
                 "policy": policy, "action": side,
                 "timestamp": at.isoformat(), "signal_at": signal_at,
+                "signal_price": signal_price,
                 "execution_candle_index": index, "execution_price": price,
                 "target_fraction": target, "reason": reason,
                 "fee_rate": fee_rate, "fee_tier": quote["tier"],
@@ -282,12 +378,25 @@ def simulate_policy(frame: pd.DataFrame, lo: int, hi: int, policy: str, *,
         opening, close = float(frame.at[i, "open"]), float(frame.at[i, "close"])
         gap = previous_at is not None and (at - previous_at).total_seconds() != source_seconds
         previous_at = at
-        if gap and units > 0:
-            trade(0.0, opening, at, i, "DATA_GAP_EXIT", None)
+
+        # Signal at a completed 4h/daily bar end T must wait for an entire
+        # intervening 30m candle. The earliest fill is at OPEN T+30min.
+        # Missing bars cancel the signal; never fill at a later unknown price.
+        if gap:
+            pending = None
+            if units > 0:
+                trade(0.0, opening, at, i, "DATA_GAP_EXIT", None)
+        if pending is not None:
+            if at == pending["execute_at"]:
+                if at <= pending["signal_timestamp"]:
+                    raise AssertionError("Sinal executado sem latência conservadora")
+                trade(pending["target"], opening, at, i, pending["reason"],
+                      pending["signal_timestamp"].isoformat(), pending["signal_price"])
+            pending = None
+
         available = decision_map.get(at, {})
         desired = last_target
         reason = None
-        decision_at = None
         if not gap:
             for period in ("4h", "1d"):
                 if period not in available:
@@ -295,21 +404,24 @@ def simulate_policy(frame: pd.DataFrame, lo: int, hi: int, policy: str, *,
                 row, daily, weekly = available[period]
                 proposed, cause = _target(policy, period, row, daily, weekly, desired, peak_close)
                 if abs(proposed - desired) >= REBALANCE_MIN_CHANGE:
-                    desired, reason, decision_at = proposed, cause, at.isoformat()
+                    desired, reason = proposed, cause
             if reason is not None:
-                if (desired > last_target and i - last_exit_index < 48):
-                    pass  # minimum 24h after full exit
-                elif (desired > 0 and last_target > 0 and abs(desired-last_target) < REBALANCE_MIN_CHANGE):
-                    pass
+                allowed = True
+                if desired > last_target and i - last_exit_index < 48:
+                    allowed = False
+                elif desired > 0 and last_target > 0 and abs(desired-last_target) < REBALANCE_MIN_CHANGE:
+                    allowed = False
                 elif desired < last_target and reason == "HYSTERESIS":
-                    pass
-                elif desired < last_target and (
-                    reason not in ("DONCHIAN_OR_ATR_EXIT", "BEARISH_CASH") and
-                    i - last_trade_index < min_hold_bars
-                ):
-                    pass
-                else:
-                    trade(desired, opening, at, i, reason, decision_at)
+                    allowed = False
+                elif desired < last_target and (reason not in ("DONCHIAN_OR_ATR_EXIT", "BEARISH_CASH")
+                    and i - last_trade_index < min_hold_bars):
+                    allowed = False
+                if allowed:
+                    pending = {
+                        "target": desired, "reason": reason,
+                        "signal_timestamp": at, "signal_price": float(frame.at[i - 1, "close"]) if i > 0 else close,
+                        "execute_at": at + timedelta(seconds=source_seconds),
+                    }
         if units > 0:
             peak_close = max(peak_close, close)
         value = cash + units * close
@@ -345,7 +457,7 @@ def simulate_policy(frame: pd.DataFrame, lo: int, hi: int, policy: str, *,
         "start": frame.at[lo, "timestamp"].isoformat(),
         "end": frame.at[hi-1, "timestamp"].isoformat(),
         "fee_model": ALPACA_FEE_MODEL,
-        "execution_rule": "Sinal somente no fechamento completo UTC 4h/1d/1w; preenchimento no próximo OPEN 30m; saída no fechamento final",
+        "execution_rule": "Sinal no fechamento confirmado T (4h, diário ou semanal); ordem simulada na abertura T+30min após candle intermediário; liquidação final sintética separada.",
     }
     if include_actions:
         result["actions"] = actions
@@ -354,7 +466,8 @@ def simulate_policy(frame: pd.DataFrame, lo: int, hi: int, policy: str, *,
 
 
 def evaluate_archived_trend_regimes(source_archive: bytes, *,
-                                    include_details: bool = False) -> dict:
+                                    include_details: bool = False,
+                                    policy_set: tuple | None = None) -> dict:
     from .archive_replay import inspect_source_archive
 
     request, _ = inspect_source_archive(source_archive)
@@ -397,8 +510,9 @@ def evaluate_archived_trend_regimes(source_archive: bytes, *,
             r.pop("actions", None)
             baseline[code][part] = r
 
+    hypotheses = POLICIES if policy_set is None else policy_set
     results, all_actions = [], []
-    for idx, (policy, label) in enumerate(POLICIES, 1):
+    for idx, (policy, label) in enumerate(hypotheses, 1):
         part_metrics = {}
         for part, (lo, hi) in periods.items():
             result = simulate_policy(
@@ -440,25 +554,47 @@ def evaluate_archived_trend_regimes(source_archive: bytes, *,
     approved_policy = chosen["parameters"]["policy"] if approved else None
     trace_start = max(periods["validation"][0], len(frame)-ceil(35*DAY_SECONDS/source_seconds))
     stride = max(1, ceil((len(frame)-trace_start)/220))
-    prices = [{"timestamp": frame.at[i, "timestamp"].isoformat(),
+    prices = [{"timestamp": (frame.at[i, "timestamp"] + timedelta(seconds=source_seconds)).isoformat(),
                "close": float(frame.at[i, "close"])}
               for i in range(trace_start, len(frame), stride)]
-    if prices and prices[-1]["timestamp"] != frame.at[len(frame)-1, "timestamp"].isoformat():
-        prices.append({"timestamp": frame.at[len(frame)-1, "timestamp"].isoformat(),
+    if prices and prices[-1]["timestamp"] != (frame.at[len(frame)-1, "timestamp"] + timedelta(seconds=source_seconds)).isoformat():
+        prices.append({"timestamp": (frame.at[len(frame)-1, "timestamp"] + timedelta(seconds=source_seconds)).isoformat(),
                        "close": float(frame.at[len(frame)-1, "close"])})
+    # Diagnostic chart is never a strategy promotion. The development-selected
+    # policy is displayed even if rejected, while the ACTIVE selector stays empty.
+    chart_policy = chosen["parameters"]["policy"] if chosen else None
     chart_actions = []
-    if approved_policy:
-        replay = simulate_policy(frame, *periods["validation"], approved_policy,
+    chart_signals = []
+    if chart_policy:
+        replay = simulate_policy(frame, *periods["validation"], chart_policy,
                                  source_seconds=source_seconds,
                                  slippage=float(request.slippage_rate),
                                  decision_map=decision_map, include_actions=True)
         chart_actions = [a for a in replay["actions"] if a["execution_candle_index"] >= trace_start]
+        chart_signals = [{
+            "action": a["action"], "timestamp": a["signal_at"],
+            "price": a["signal_price"], "reason": a["reason"],
+            "execution_at": a["timestamp"],
+        } for a in chart_actions if a.get("signal_at")]
+    # Historical turning points are descriptive only; confirmation arrives
+    # AFTER the pivot, and neither pivot nor confirmation is an implicit trade.
+    extrema = find_confirmed_extrema(frame, trace_start, len(frame), .02, source_seconds)
+    inflections = [{
+        "kind": "BOTTOM" if e["kind"] == "BOTTOM_CONFIRMED" else "TOP",
+        "pivot_timestamp": (pd.Timestamp(e["pivot_timestamp"]) + timedelta(seconds=source_seconds)).isoformat(),
+        "pivot_close": e["pivot_close"],
+        "confirmed_at": (pd.Timestamp(e["confirmed_at"]) +
+                         timedelta(seconds=source_seconds)).isoformat(),
+        "confirmed_close": e["confirmed_close"],
+        "lag_candles": e["lag_candles"],
+        "threshold_fraction": e["threshold_fraction"],
+    } for e in extrema]
     summary = {
-        "experiment": "BTC_TREND_REGIMES_V14",
+        "experiment": "BTC_INDICATOR_LAB_V15" if len(hypotheses) > 6 else "BTC_TREND_REGIMES_V14_DELAYED",
         "result_status": "PRE_OOS_APPROVED_NEEDS_FRESH_DATA" if approved else "NO_STRATEGY_APPROVED",
         "approval_rules": APPROVAL_RULES,
-        "candidate_count": len(POLICIES),
-        "rejected_count": len(POLICIES)-(1 if approved else 0),
+        "candidate_count": len(hypotheses),
+        "rejected_count": len(hypotheses)-(1 if approved else 0),
         "approved_policies": [approved_policy] if approved else [],
         "chosen_only_on_development": chosen["parameters"]["policy"] if chosen else None,
         "chosen_validation": chosen["metrics"] if chosen else None,
@@ -480,13 +616,20 @@ def evaluate_archived_trend_regimes(source_archive: bytes, *,
         "fee_model": ALPACA_FEE_MODEL, "slippage_rate": float(request.slippage_rate),
         "initial_capital_usd_equivalent": INITIAL_CAPITAL,
         "buy_hold_baseline": baseline["BUY_HOLD"], "cash_baseline": baseline["CASH"],
-        "chart": {"prices": prices, "actions": chart_actions},
+        "chart": {"prices": prices, "actions": chart_actions, "signals": chart_signals,
+                  "inflections": inflections, "diagnostic_policy": chart_policy,
+                  "diagnostic_only": not approved, "inflexion_threshold": .02},
+        "indicator_catalog": ["SMA20/50/100/200", "EMA12/20/26/36/50/100/200",
+                              "RSI14", "MACD_12_26_9", "ADX14", "DI_PLUS", "DI_MINUS",
+                              "BOLLINGER20_2", "KELTNER20_2ATR", "ATR14", "ROC20",
+                              "STOCHASTIC14_3_3", "DONCHIAN20", "ANNUALIZED_VOL30"],
+        "conservative_fill_delay_minutes": 30,
         "oos_executed": False, "live_orders_enabled": False,
         "research_warning": (
             "Pesquisa PRE-OOS: nem a seleção nem a validação constituem teste independente inédito. "
             "Candles 4h/diários/semanais só entram após fechamento completo. "
-            "Ordens e stops executados na abertura seguinte de 30m, ou fechamento final; "
-            "não existe preenchimento intrabar garantido. BTCUSDT é proxy para Alpaca BTCUSD. "
+            "Ordens e stops simulados na abertura 30 minutos DEPOIS da confirmação, "
+            "sem garantia intrabar; a última liquidação da janela é sintética. BTCUSDT representa proxy Alpaca BTCUSD. "
             "Carteiras e fees usam preços históricos e slippage simulado."
         ),
     }

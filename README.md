@@ -1,5 +1,38 @@
 # Crypto Paper Trader ML API
 
+## V15 · BTC Indicator Lab (experimental)
+
+The one-click `INDICATOR_LAB` mode evaluates 12 fixed predeclared strategies on
+cached pre-OOS BTC/USDT 30-minute history, adding 6 indicator combinations to
+the 6 V14 trend/regime hypotheses. Added indicators include RSI(14), MACD,
+ADX/DI, Bollinger and Keltner bands, ROC, stochastic and more EMA/SMA windows.
+
+Conservative backtesting: a completed 4h/daily/weekly candle at T makes
+a signal available **at T**. The next OPEN at T is forbidden; an additional
+complete 30-minute candle must elapse and simulated execution is at OPEN
+**T+30 minutes**. Missing source candles cancel pending signals. This is
+a conservative candle-data assumption, not real latency measurement.
+A synthetic end-of-window close liquidation is explicitly identified.
+
+The graph contains distinct records for (1) historical 2% DC pivot,
+(2) later 2% confirmation, (3) strategy signal, and (4) actual simulated
+execution at a later price/time. The pivot is *not* observable or tradable
+when it happens; recognition happens afterward. Plot time of candle-close
+values is its actual close, not the start-of-candle timestamp.
+
+Only a strategy selected using development and passing preset validation
+tests (net growth, at least 1% above Buy and Hold, no-worse drawdown) can be
+approved. Rejected policies are NEVER selectable as strategies in the clean
+front; current diagnostic trade overlay is still available with an explicit
+rejected label. All results and marker/event chronology export to ZIP:
+`trend_regimes.json`, `trend_regimes_portfolios.csv`,
+`trend_regimes_trades.csv`, `indicator_lab_markers.csv` and the source
+historical ZIP. No external scripts or live orders.
+
+The original `TREND_REGIMES` API mode still accepts its six fixed V14
+hypotheses, now with the conservative execution correction.
+
+
 ## BTC Trend & Regimes V14 (clean, cost-aware research)
 
 The new \`TREND_REGIMES\` API research mode compares six **fixed hypotheses** on
