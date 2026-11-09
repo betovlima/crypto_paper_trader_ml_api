@@ -230,3 +230,111 @@ def test_rsi_strong_monotonic_rally_is_100_not_neutral_50():
     bars = completed_bars(source, source_seconds=1800,
                           bar_seconds=4*3600, frequency="4h")
     assert bars["rsi14"].iloc[-1] == 100
+
+
+def test_v16_requires_development_edge_before_a_candidate_is_selected():
+    archive = _event_archive()
+    result = evaluate_archived_trend_regimes(
+        archive, require_development_edge=True)
+    summary = result["summary"]
+    assert summary["experiment"] == "BTC_EXPOSURE_RESEARCH_V16"
+    assert summary["development_benchmark_required"] is True
+    assert summary["development_eligible_count"] == 0
+    assert summary["development_none_eligible"] is True
+    assert summary["chosen_only_on_development"] is None
+    assert summary["approved_policies"] == []
+    assert summary["result_status"] == "NO_STRATEGY_APPROVED"
+    assert len(summary["exposure_diagnostics"]) == len(POLICIES)
+    assert summary["chart"]["diagnostic_only"] is True
+    assert summary["chart"]["diagnostic_candidate_not_selected"] is True
+    for trial in result["trials"]:
+        assert trial["metrics"]["quality_checks"]["development_beats_buy_hold"] is False
+
+
+def test_v16_complete_chart_preserves_every_30min_close_without_sampling():
+    result = evaluate_archived_trend_regimes(
+        _event_archive(), require_development_edge=True)
+    chart = result["summary"]["chart"]
+    timestamps = pd.to_datetime([point["timestamp"] for point in chart["prices"]], utc=True)
+    assert chart["full_resolution"] is True
+    assert chart["source_candle_minutes"] == 30
+    assert timestamps.is_monotonic_increasing
+    assert len(timestamps) > 300
+    # Verify no sampled/skipped candles on this fully contiguous fixture.
+    assert (timestamps.to_series().diff().iloc[1:] == pd.Timedelta(minutes=30)).all()
+
+
+def test_v16_exposure_metrics_are_bounded_and_cannot_claim_exact_profit():
+    frame = _candles()
+    decisions = build_decision_map(frame, 1800)
+    cash_policy = simulate_policy(frame, 0, len(frame),
+                                  "FOUR_HOUR_KELTNER", source_seconds=1800,
+                                  slippage=.0005, decision_map=decisions,
+                                  collect_exposure=True)
+    exposure = cash_policy["exposure_diagnostics"]
+    assert 0 <= exposure["missed_upside_share"] <= 1 + 1e-9
+    assert 0 <= exposure["avoided_downside_share"] <= 1 + 1e-9
+    assert exposure["full_cash_candles"] >= 0
+    assert exposure["fully_cash_hours"] == exposure["full_cash_candles"] / 2
+    assert "not an exact counterfactual" in exposure["method"]
+
+
+def test_v16_replay_is_unchanged_by_source_oos_mutation():
+    normal = evaluate_archived_trend_regimes(
+        _event_archive(), require_development_edge=True)
+    modified = evaluate_archived_trend_regimes(
+        _event_archive(post_oos_mutation=True), require_development_edge=True)
+    assert normal["trials"] == modified["trials"]
+    assert normal["summary"]["exposure_diagnostics"] == modified["summary"]["exposure_diagnostics"]
+
+
+def test_v16_api_one_click_preserves_all_rejections_and_exports_exposure(monkeypatch):
+    source = _insert_source()
+    tasks = []
+
+    class Executor:
+        def submit(self, fn, *args):
+            tasks.append((fn, args))
+
+    monkeypatch.setattr(service, "_get_executor", lambda settings: Executor())
+    with SessionLocal.begin() as session:
+        session.get(MLBacktestAudit, source).archive_zip = _event_archive()
+    try:
+        with TestClient(app) as client:
+            response = client.post("/v1/ml-strategies", json={
+                "name": "BTC exposure research V16", "source_job_id": source,
+            })
+            assert response.status_code == 201, response.text
+            sid = response.json()["id"]
+            started = client.post(f"/v1/ml-strategies/{sid}/optimize", json={
+                "mode": "EXPOSURE_RESEARCH", "trials": len(POLICIES),
+                "auto_execute": False,
+            })
+            assert started.status_code == 202, started.text
+            assert len(tasks) == 1
+            tasks[0][0](*tasks[0][1])
+            saved = client.get(f"/v1/ml-strategies/{sid}").json()
+            assert saved["status"] == "RESEARCH_COMPLETE", saved
+            assert saved["mode"] == "EXPOSURE_RESEARCH"
+            assert saved["champion"] is None
+            assert saved["summary"]["development_none_eligible"]
+            exported = client.get(f"/v1/ml-strategies/{sid}/report.zip")
+            assert exported.status_code == 200, exported.text
+            with ZipFile(BytesIO(exported.content)) as archive:
+                assert {"trend_regimes.json", "trend_regimes_portfolios.csv",
+                        "trend_regimes_trades.csv", "indicator_lab_markers.csv",
+                        "exposure_diagnostics.csv",
+                        "source_historical_audit.zip"} <= set(archive.namelist())
+                assert b"missed_upside_share" in archive.read("exposure_diagnostics.csv")
+    finally:
+        _cleanup(source)
+
+
+def test_v16_diagnostics_do_not_mutate_legacy_v15_replay_trial_metrics():
+    baseline = evaluate_archived_trend_regimes(_event_archive())
+    assert baseline["summary"]["experiment"] == "BTC_INDICATOR_LAB_V15"
+    assert "exposure_diagnostics" not in baseline["trials"][0]["metrics"]
+    assert "exposure_diagnostics" not in baseline["trials"][0]["metrics"]["development"]
+    v16 = evaluate_archived_trend_regimes(
+        _event_archive(), require_development_edge=True)
+    assert "exposure_diagnostics" in v16["trials"][0]["metrics"]

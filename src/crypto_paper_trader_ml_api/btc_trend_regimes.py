@@ -40,6 +40,7 @@ POLICIES = (
 )
 V14_POLICIES = POLICIES[:6]
 POLICY_NAMES = {code for code, _ in POLICIES}
+V16_DEVELOPMENT_EDGE_FACTOR = 1.01
 APPROVAL_RULES = {
     "development": "retorno líquido positivo e pelo menos uma compra e uma venda",
     "validation": (
@@ -300,7 +301,8 @@ def build_decision_map(frame: pd.DataFrame, source_seconds: int) -> dict:
 
 def simulate_policy(frame: pd.DataFrame, lo: int, hi: int, policy: str, *,
                     source_seconds: int, slippage: float, decision_map: dict,
-                    include_actions: bool = False) -> dict:
+                    include_actions: bool = False,
+                    collect_exposure: bool = False) -> dict:
     if policy not in POLICY_NAMES or not (0 <= lo < hi <= len(frame)):
         raise ValueError("Política ou intervalo BTC inválido")
     if not 0 <= slippage < .05:
@@ -313,6 +315,13 @@ def simulate_policy(frame: pd.DataFrame, lo: int, hi: int, policy: str, *,
     last_target, peak_close = 0.0, 0.0
     last_trade_index, last_exit_index = -100000, -100000
     actions, equity = [], []
+    upside_log_total = 0.0
+    upside_log_unexposed = 0.0
+    downside_log_total = 0.0
+    downside_log_unexposed = 0.0
+    full_cash_bars = 0
+    partial_bars = 0
+    unexposed_up_bars = 0
     previous_at = None
     pending = None
     min_hold_bars = 48 if policy not in ("WEEKLY_TREND_FILTER",) else 7 * 48
@@ -422,6 +431,25 @@ def simulate_policy(frame: pd.DataFrame, lo: int, hi: int, policy: str, *,
                         "signal_timestamp": at, "signal_price": float(frame.at[i - 1, "close"]) if i > 0 else close,
                         "execute_at": at + timedelta(seconds=source_seconds),
                     }
+        # Exposure and missed BTC movement are measured *after* any OPEN
+        # executions, before the current candle CLOSE, never with future prices.
+        opening_value = cash + units * opening
+        opening_weight = float(np.clip(units * opening / opening_value, 0.0, 1.0)) if opening_value > 0 else 0.0
+        unexposed = 1.0 - opening_weight
+        if opening_weight < 1e-9:
+            full_cash_bars += 1
+        elif unexposed > 1e-4:
+            partial_bars += 1
+        if not gap and opening > 0 and close > 0:
+            candle_log = float(log(close / opening))
+            if candle_log > 0:
+                upside_log_total += candle_log
+                upside_log_unexposed += candle_log * unexposed
+                if unexposed > .99:
+                    unexposed_up_bars += 1
+            elif candle_log < 0:
+                downside_log_total -= candle_log
+                downside_log_unexposed -= candle_log * unexposed
         if units > 0:
             peak_close = max(peak_close, close)
         value = cash + units * close
@@ -453,12 +481,31 @@ def simulate_policy(frame: pd.DataFrame, lo: int, hi: int, policy: str, *,
         "sell_count": int(sell_count), "completed_cycles": int(complete_exits),
         "operation_count": buy_count + sell_count,
         "exposure": float(exposure_sum/(hi-lo)), "fees_paid": float(fees),
+        "exposure_diagnostics": {
+            "full_cash_candles": full_cash_bars,
+            "partially_invested_candles": partial_bars,
+            "fully_cash_hours": float(full_cash_bars * source_seconds / 3600),
+            "btc_positive_open_close_log_return": float(upside_log_total),
+            "unexposed_positive_open_close_log_return": float(upside_log_unexposed),
+            "missed_upside_share": float(upside_log_unexposed / upside_log_total) if upside_log_total else 0.0,
+            "btc_negative_open_close_log_return_magnitude": float(downside_log_total),
+            "unexposed_negative_open_close_log_return_magnitude": float(downside_log_unexposed),
+            "avoided_downside_share": float(downside_log_unexposed / downside_log_total) if downside_log_total else 0.0,
+            "positive_candles_fully_in_cash": unexposed_up_bars,
+            "method": "sum of log(CLOSE/OPEN) weighted by uninvested opening fraction; "
+                      "descriptive, excludes overnight/open gaps and trading costs; "
+                      "not an exact counterfactual terminal dollar profit",
+        },
         "slippage_usd_estimate": float(slip_paid),
         "start": frame.at[lo, "timestamp"].isoformat(),
         "end": frame.at[hi-1, "timestamp"].isoformat(),
         "fee_model": ALPACA_FEE_MODEL,
         "execution_rule": "Sinal no fechamento confirmado T (4h, diário ou semanal); ordem simulada na abertura T+30min após candle intermediário; liquidação final sintética separada.",
     }
+    # Preserve exact V14/V15 replay metrics so previously persisted audits
+    # remain reproducible; exposure diagnostics belong only to V16.
+    if not collect_exposure:
+        result.pop("exposure_diagnostics", None)
     if include_actions:
         result["actions"] = actions
         result["equity_curve"] = equity
@@ -467,7 +514,8 @@ def simulate_policy(frame: pd.DataFrame, lo: int, hi: int, policy: str, *,
 
 def evaluate_archived_trend_regimes(source_archive: bytes, *,
                                     include_details: bool = False,
-                                    policy_set: tuple | None = None) -> dict:
+                                    policy_set: tuple | None = None,
+                                    require_development_edge: bool = False) -> dict:
     from .archive_replay import inspect_source_archive
 
     request, _ = inspect_source_archive(source_archive)
@@ -519,6 +567,7 @@ def evaluate_archived_trend_regimes(source_archive: bytes, *,
                 frame, lo, hi, policy, source_seconds=source_seconds,
                 slippage=float(request.slippage_rate),
                 decision_map=decision_map, include_actions=include_details,
+                collect_exposure=require_development_edge,
             )
             if include_details:
                 all_actions.extend({"partition": part, **a}
@@ -528,6 +577,9 @@ def evaluate_archived_trend_regimes(source_archive: bytes, *,
 
         dev, val = part_metrics["development"], part_metrics["validation"]
         checks = {
+            **({"development_beats_buy_hold":
+                dev["capital_final"] >= V16_DEVELOPMENT_EDGE_FACTOR * baseline["BUY_HOLD"]["development"]["capital_final"]}
+               if require_development_edge else {}),
             "development_positive": dev["net_profit_usd"] > 0,
             "development_operated": dev["buy_count"] >= 1 and dev["sell_count"] >= 1,
             "validation_positive": val["net_profit_usd"] > 0,
@@ -545,7 +597,9 @@ def evaluate_archived_trend_regimes(source_archive: bytes, *,
             },
         })
     eligible = [r for r in results if r["metrics"]["quality_checks"]["development_positive"]
-                and r["metrics"]["quality_checks"]["development_operated"]]
+                and r["metrics"]["quality_checks"]["development_operated"]
+                and (not require_development_edge
+                     or r["metrics"]["quality_checks"]["development_beats_buy_hold"])]
     chosen = max(eligible, key=lambda r: (
         log(max(1e-12, r["metrics"]["development"]["capital_final"]/INITIAL_CAPITAL))
         + .5*r["metrics"]["development"]["max_drawdown"]
@@ -553,23 +607,29 @@ def evaluate_archived_trend_regimes(source_archive: bytes, *,
     approved = bool(chosen and chosen["metrics"]["passed_internal_checks"])
     approved_policy = chosen["parameters"]["policy"] if approved else None
     trace_start = max(periods["validation"][0], len(frame)-ceil(35*DAY_SECONDS/source_seconds))
-    stride = max(1, ceil((len(frame)-trace_start)/220))
+    # Full-resolution 30m series (35 days ≈ 1680 points), without the V15
+    # sampling that shifted extrema relative to the plotted line.
     prices = [{"timestamp": (frame.at[i, "timestamp"] + timedelta(seconds=source_seconds)).isoformat(),
                "close": float(frame.at[i, "close"])}
-              for i in range(trace_start, len(frame), stride)]
+              for i in range(trace_start, len(frame))]
     if prices and prices[-1]["timestamp"] != (frame.at[len(frame)-1, "timestamp"] + timedelta(seconds=source_seconds)).isoformat():
         prices.append({"timestamp": (frame.at[len(frame)-1, "timestamp"] + timedelta(seconds=source_seconds)).isoformat(),
                        "close": float(frame.at[len(frame)-1, "close"])})
     # Diagnostic chart is never a strategy promotion. The development-selected
     # policy is displayed even if rejected, while the ACTIVE selector stays empty.
-    chart_policy = chosen["parameters"]["policy"] if chosen else None
+    diagnostic_candidate = max(results, key=lambda r: (
+        log(max(1e-12, r["metrics"]["development"]["capital_final"]/INITIAL_CAPITAL))
+        + .5 * r["metrics"]["development"]["max_drawdown"]
+    ), default=None)
+    chart_policy = (chosen or diagnostic_candidate)["parameters"]["policy"] if results else None
     chart_actions = []
     chart_signals = []
     if chart_policy:
         replay = simulate_policy(frame, *periods["validation"], chart_policy,
                                  source_seconds=source_seconds,
                                  slippage=float(request.slippage_rate),
-                                 decision_map=decision_map, include_actions=True)
+                                 decision_map=decision_map, include_actions=True,
+                                 collect_exposure=require_development_edge)
         chart_actions = [a for a in replay["actions"] if a["execution_candle_index"] >= trace_start]
         chart_signals = [{
             "action": a["action"], "timestamp": a["signal_at"],
@@ -590,15 +650,26 @@ def evaluate_archived_trend_regimes(source_archive: bytes, *,
         "threshold_fraction": e["threshold_fraction"],
     } for e in extrema]
     summary = {
-        "experiment": "BTC_INDICATOR_LAB_V15" if len(hypotheses) > 6 else "BTC_TREND_REGIMES_V14_DELAYED",
+        "experiment": ("BTC_EXPOSURE_RESEARCH_V16" if require_development_edge else
+                       "BTC_INDICATOR_LAB_V15" if len(hypotheses) > 6 else "BTC_TREND_REGIMES_V14_DELAYED"),
         "result_status": "PRE_OOS_APPROVED_NEEDS_FRESH_DATA" if approved else "NO_STRATEGY_APPROVED",
-        "approval_rules": APPROVAL_RULES,
+        "approval_rules": {
+            **APPROVAL_RULES,
+            **({"development_benchmark": "selected only if net final capital >= 101% of Buy & Hold in development"}
+               if require_development_edge else {}),
+        },
+        "development_benchmark_required": require_development_edge,
+        "development_eligible_count": len(eligible),
+        "development_none_eligible": require_development_edge and not bool(eligible),
+        "development_buy_hold_capital_final": baseline["BUY_HOLD"]["development"]["capital_final"],
         "candidate_count": len(hypotheses),
         "rejected_count": len(hypotheses)-(1 if approved else 0),
         "approved_policies": [approved_policy] if approved else [],
         "chosen_only_on_development": chosen["parameters"]["policy"] if chosen else None,
         "chosen_validation": chosen["metrics"] if chosen else None,
         "chosen_rejection_reasons": ([
+            "no_candidate_beats_buy_hold_in_development"
+        ] if require_development_edge and not eligible else [
             key for key, passed in chosen["metrics"]["quality_checks"].items() if not passed
         ] if chosen and not approved else []),
         "approved_validation": chosen["metrics"] if approved else None,
@@ -616,9 +687,24 @@ def evaluate_archived_trend_regimes(source_archive: bytes, *,
         "fee_model": ALPACA_FEE_MODEL, "slippage_rate": float(request.slippage_rate),
         "initial_capital_usd_equivalent": INITIAL_CAPITAL,
         "buy_hold_baseline": baseline["BUY_HOLD"], "cash_baseline": baseline["CASH"],
+        "exposure_diagnostics": ([
+            {"policy": t["parameters"]["policy"],
+             "development": t["metrics"]["development"]["exposure_diagnostics"],
+             "validation": t["metrics"]["exposure_diagnostics"],
+             "development_vs_buy_hold_usd":
+                t["metrics"]["development"]["capital_final"] - baseline["BUY_HOLD"]["development"]["capital_final"],
+             "validation_vs_buy_hold_usd":
+                t["metrics"]["capital_final"] - baseline["BUY_HOLD"]["validation"]["capital_final"],
+             "development_eligible": t in eligible}
+            for t in results
+        ] if require_development_edge else []),
         "chart": {"prices": prices, "actions": chart_actions, "signals": chart_signals,
                   "inflections": inflections, "diagnostic_policy": chart_policy,
-                  "diagnostic_only": not approved, "inflexion_threshold": .02},
+                  "diagnostic_only": not approved, "inflexion_threshold": .02,
+                  "full_resolution": True, "source_candle_minutes": 30,
+                  "diagnostic_candidate_not_selected": chosen is None,
+                  "diagnostic_exposure": (diagnostic_candidate["metrics"]["exposure_diagnostics"]
+                                           if diagnostic_candidate and require_development_edge else None)},
         "indicator_catalog": ["SMA20/50/100/200", "EMA12/20/26/36/50/100/200",
                               "RSI14", "MACD_12_26_9", "ADX14", "DI_PLUS", "DI_MINUS",
                               "BOLLINGER20_2", "KELTNER20_2ATR", "ATR14", "ROC20",

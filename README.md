@@ -1,5 +1,45 @@
 # Crypto Paper Trader ML API
 
+## V16 · BTC Exposure Research (costed, pre-OOS)
+
+The new \`EXPOSURE_RESEARCH\` mode runs the twelve fixed V15
+technical policies through the same source 30-minute BTC/CASH archive.
+The entry point remains one click in the front, with no shell scripts,
+no automatic OOS execution and no real orders.
+
+**New, frozen-before-validation development gate:** any candidate must
+make real trades, have positive net profit, and close the development
+segment with at least 101% of Buy & Hold's development final equity.
+If none qualifies, \`chosen_only_on_development = null\`,
+\`development_none_eligible = true\`, \`approved_policies = []\`.
+The historical validation metrics remain available as diagnostic
+observations but must not be treated as an independent winner selection.
+A chart of the development-best *rejected diagnostic* may still be shown
+with explicit \`diagnostic_candidate_not_selected\` and \`diagnostic_only\`.
+
+The simulator now computes **open-to-close BTC exposure analysis** for
+each policy and segment, independent of the capitalized portfolio equity.
+Fields include fully-cash hours, partial exposure, proportion of
+positive intrabar BTC log moves not captured due to not being invested,
+and proportion of negative intrabar moves from which the cash fraction
+was protected. These are descriptive log-return-weighted proportions,
+NOT counterfactual final-capital profits. Intrabar prices, spreads, gap
+returns and hidden fills are not inferred.
+
+The chart now includes **every contiguous 30m candle close**, typically
+1680+ points over 35 days, plus actual historical pivot, later
+confirmation, policy signal and conservative T+30m simulated fills.
+No downsampling or future knowledge. The UI can view 10 or 35 days
+without truncating the source audit.
+
+The download retains all candidates and source audit, and now adds
+\`exposure_diagnostics.csv\` to the V15 trading actions and annotated
+\`indicator_lab_markers.csv\`.
+
+Previous \`INDICATOR_LAB\` mode remains independent for reproducibility;
+new rules and outputs are versioned as \`EXPOSURE_RESEARCH\`.
+
+
 ## V15 · BTC Indicator Lab (experimental)
 
 The one-click `INDICATOR_LAB` mode evaluates 12 fixed predeclared strategies on
