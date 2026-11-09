@@ -301,7 +301,8 @@ def build_decision_map(frame: pd.DataFrame, source_seconds: int) -> dict:
 
 def simulate_policy(frame: pd.DataFrame, lo: int, hi: int, policy: str, *,
                     source_seconds: int, slippage: float, decision_map: dict,
-                    include_actions: bool = False) -> dict:
+                    include_actions: bool = False,
+                    collect_exposure: bool = False) -> dict:
     if policy not in POLICY_NAMES or not (0 <= lo < hi <= len(frame)):
         raise ValueError("Política ou intervalo BTC inválido")
     if not 0 <= slippage < .05:
@@ -501,6 +502,10 @@ def simulate_policy(frame: pd.DataFrame, lo: int, hi: int, policy: str, *,
         "fee_model": ALPACA_FEE_MODEL,
         "execution_rule": "Sinal no fechamento confirmado T (4h, diário ou semanal); ordem simulada na abertura T+30min após candle intermediário; liquidação final sintética separada.",
     }
+    # Preserve exact V14/V15 replay metrics so previously persisted audits
+    # remain reproducible; exposure diagnostics belong only to V16.
+    if not collect_exposure:
+        result.pop("exposure_diagnostics", None)
     if include_actions:
         result["actions"] = actions
         result["equity_curve"] = equity
@@ -562,6 +567,7 @@ def evaluate_archived_trend_regimes(source_archive: bytes, *,
                 frame, lo, hi, policy, source_seconds=source_seconds,
                 slippage=float(request.slippage_rate),
                 decision_map=decision_map, include_actions=include_details,
+                collect_exposure=require_development_edge,
             )
             if include_details:
                 all_actions.extend({"partition": part, **a}
@@ -622,7 +628,8 @@ def evaluate_archived_trend_regimes(source_archive: bytes, *,
         replay = simulate_policy(frame, *periods["validation"], chart_policy,
                                  source_seconds=source_seconds,
                                  slippage=float(request.slippage_rate),
-                                 decision_map=decision_map, include_actions=True)
+                                 decision_map=decision_map, include_actions=True,
+                                 collect_exposure=require_development_edge)
         chart_actions = [a for a in replay["actions"] if a["execution_candle_index"] >= trace_start]
         chart_signals = [{
             "action": a["action"], "timestamp": a["signal_at"],
@@ -680,7 +687,7 @@ def evaluate_archived_trend_regimes(source_archive: bytes, *,
         "fee_model": ALPACA_FEE_MODEL, "slippage_rate": float(request.slippage_rate),
         "initial_capital_usd_equivalent": INITIAL_CAPITAL,
         "buy_hold_baseline": baseline["BUY_HOLD"], "cash_baseline": baseline["CASH"],
-        "exposure_diagnostics": [
+        "exposure_diagnostics": ([
             {"policy": t["parameters"]["policy"],
              "development": t["metrics"]["development"]["exposure_diagnostics"],
              "validation": t["metrics"]["exposure_diagnostics"],
@@ -690,14 +697,14 @@ def evaluate_archived_trend_regimes(source_archive: bytes, *,
                 t["metrics"]["capital_final"] - baseline["BUY_HOLD"]["validation"]["capital_final"],
              "development_eligible": t in eligible}
             for t in results
-        ],
+        ] if require_development_edge else []),
         "chart": {"prices": prices, "actions": chart_actions, "signals": chart_signals,
                   "inflections": inflections, "diagnostic_policy": chart_policy,
                   "diagnostic_only": not approved, "inflexion_threshold": .02,
                   "full_resolution": True, "source_candle_minutes": 30,
                   "diagnostic_candidate_not_selected": chosen is None,
                   "diagnostic_exposure": (diagnostic_candidate["metrics"]["exposure_diagnostics"]
-                                           if diagnostic_candidate else None)},
+                                           if diagnostic_candidate and require_development_edge else None)},
         "indicator_catalog": ["SMA20/50/100/200", "EMA12/20/26/36/50/100/200",
                               "RSI14", "MACD_12_26_9", "ADX14", "DI_PLUS", "DI_MINUS",
                               "BOLLINGER20_2", "KELTNER20_2ATR", "ATR14", "ROC20",
