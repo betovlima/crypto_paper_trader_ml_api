@@ -1,5 +1,45 @@
 # Crypto Paper Trader ML API
 
+## BTC Trend & Regimes V14 (clean, cost-aware research)
+
+The new \`TREND_REGIMES\` API research mode compares six **fixed hypotheses** on
+one archived Bitcoin history: daily SMA50 with a 1.2% deadband, daily SMA20/100,
+4-hour Donchian breakout with ATR exit and daily trend confirmation, 4-hour
+EMA12/36 with daily confirmation, daily volatility-regime position sizing
+(0%, 50% or 100% BTC), and daily trend with a trailing seven-day-bar filter.
+
+The engine aggregates only FULL 30-minute source candles. Higher-timeframe
+4-hour, daily and consecutive seven-day UTC bars are aligned to fixed UTC epoch
+boundaries; a missing 30-minute candle invalidates its aggregate bar. Signals
+only fire when the whole higher-timeframe bar has CLOSED, executing at the
+first available **next 30-minute opening**. The source OOS and incomplete candles
+are never used to create the signals. Actual intrabar stop fills and spread
+are not asserted.
+
+All policies reuse the $10,000 single reinvested BTC/CASH account, dynamic
+Alpaca taker-fee tiers, slippage, gaps and same chronological pre-OOS
+development, embargo and validation partitions. Partial BTC exposure is never
+leveraged and only rebalanced on meaningful target changes. Both CASH and
+Buy & Hold are compared over identical intervals.
+
+**Approval is deliberately strict and frozen before evaluation**: a candidate
+must be selected using development only, make real trades, earn positive net
+returns in validation, exceed validation Buy & Hold's final capital by at
+least 1%, and have no worse maximum drawdown. Otherwise \`approved_policies\`
+is EMPTY and \`NO_STRATEGY_APPROVED\` is the result. No losing candidate is
+promoted simply for being the best among poor results.
+
+One front-end click invokes
+\`POST /v1/ml-strategies/{id}/optimize\` with
+\`{"mode":"TREND_REGIMES","trials":6,"auto_execute":false}\`.
+\`report.zip\` retains **ALL** rejected and approved candidates with metrics,
+exact simulated fills, source audit, source SHA-256, selection conditions, and
+the test-boundary provenance. No new scripts, re-downloads or live orders.
+
+This is exploratory historical evidence. Previously viewed OOS is NOT a new
+independent test; fresh subsequent candles are required for confirmation.
+
+
 ## BTC Technical Capital V13
 
 New `TECHNICAL` research mode compares six **predeclared** causal BTC/CASH
