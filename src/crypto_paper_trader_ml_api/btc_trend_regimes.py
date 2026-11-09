@@ -112,7 +112,11 @@ def completed_bars(frame: pd.DataFrame, *, source_seconds: int,
     delta = close.diff()
     gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     loss = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    result["rsi14"] = (100 - 100/(1 + gain/loss.replace(0, np.nan))).fillna(50)
+    # RSI = 100 after a one-sided rally (zero average losses), 50 when
+    # both average gains and losses are zero; never silently map rallies to 50.
+    rsi = 100 - 100/(1 + gain/loss.replace(0, np.nan))
+    rsi = rsi.mask((loss == 0) & (gain > 0), 100)
+    result["rsi14"] = rsi.mask((loss == 0) & (gain == 0), 50)
     macd = result["ema12"] - result["ema26"]
     result["macd"] = macd
     result["macd_signal"] = macd.ewm(span=9, adjust=False).mean()
