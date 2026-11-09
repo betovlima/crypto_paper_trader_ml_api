@@ -261,7 +261,7 @@ def test_v16_complete_chart_preserves_every_30min_close_without_sampling():
     assert timestamps.is_monotonic_increasing
     assert len(timestamps) > 300
     # Verify no sampled/skipped candles on this fully contiguous fixture.
-    assert timestamps.diff()[1:].eq(pd.Timedelta(minutes=30)).all()
+    assert (timestamps.to_series().diff().iloc[1:] == pd.Timedelta(minutes=30)).all()
 
 
 def test_v16_exposure_metrics_are_bounded_and_cannot_claim_exact_profit():
@@ -269,7 +269,8 @@ def test_v16_exposure_metrics_are_bounded_and_cannot_claim_exact_profit():
     decisions = build_decision_map(frame, 1800)
     cash_policy = simulate_policy(frame, 0, len(frame),
                                   "FOUR_HOUR_KELTNER", source_seconds=1800,
-                                  slippage=.0005, decision_map=decisions)
+                                  slippage=.0005, decision_map=decisions,
+                                  collect_exposure=True)
     exposure = cash_policy["exposure_diagnostics"]
     assert 0 <= exposure["missed_upside_share"] <= 1 + 1e-9
     assert 0 <= exposure["avoided_downside_share"] <= 1 + 1e-9
@@ -327,3 +328,13 @@ def test_v16_api_one_click_preserves_all_rejections_and_exports_exposure(monkeyp
                 assert b"missed_upside_share" in archive.read("exposure_diagnostics.csv")
     finally:
         _cleanup(source)
+
+
+def test_v16_diagnostics_do_not_mutate_legacy_v15_replay_trial_metrics():
+    baseline = evaluate_archived_trend_regimes(_event_archive())
+    assert baseline["summary"]["experiment"] == "BTC_INDICATOR_LAB_V15"
+    assert "exposure_diagnostics" not in baseline["trials"][0]["metrics"]
+    assert "exposure_diagnostics" not in baseline["trials"][0]["metrics"]["development"]
+    v16 = evaluate_archived_trend_regimes(
+        _event_archive(), require_development_edge=True)
+    assert "exposure_diagnostics" in v16["trials"][0]["metrics"]
