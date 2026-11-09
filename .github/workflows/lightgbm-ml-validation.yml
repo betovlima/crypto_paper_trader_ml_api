@@ -16,6 +16,7 @@ on:
       - feature/btc-directional-change-v13-technical-20261109
       - feature/btc-directional-change-v14-trend-regimes-20261109
       - feature/btc-directional-change-v15-indicators-execution-20261109
+      - feature/btc-v16-exposure-research-20261109
   workflow_dispatch:
 
 jobs:
